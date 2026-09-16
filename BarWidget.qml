@@ -6,7 +6,7 @@ import "Model.js" as Model
 
 BarWidget {
   id: root
-  moduleName: "shienze.agent-status"
+  moduleName: "shienze.muster"
 
   // The scan + alert loop lives in the plugin's service singleton, so the
   // chip only renders what the service knows. Probe the probe counter so the
@@ -144,7 +144,7 @@ BarWidget {
   }
 
   IpcHandler {
-    target: "shienze.agent-status"
+    target: "shienze.muster"
 
     function open(): void { root.open() }
     function close(): void { root.close() }

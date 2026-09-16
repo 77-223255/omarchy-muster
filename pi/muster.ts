@@ -1,14 +1,14 @@
 // @ts-nocheck
 //
-// Pi → Agent Status bridge.
+// Pi → Muster bridge.
 //
 // Writes one JSON session record per pi process into
-//   $XDG_STATE_HOME/omarchy/agent-status/sessions/  (default ~/.local/state/...)
-// which the `shienze.agent-status` Omarchy shell plugin watches. The plugin is
+//   $XDG_STATE_HOME/omarchy/muster/sessions/  (default ~/.local/state/...)
+// which the `shienze.muster` Omarchy shell plugin watches. The plugin is
 // a pure display: it never talks to pi, it only reads records.
 //
 // The record is the integration contract. Anything that can write this shape
-// is a first-class agent to the widget — see bin/agent-status-report for a
+// is a first-class agent to the widget — see bin/muster-report for a
 // shell-friendly writer aimed at the other agents omarchy ships.
 //
 // State mapping:
@@ -33,7 +33,7 @@ function stateDir() {
 		process.env.XDG_STATE_HOME && process.env.XDG_STATE_HOME.length > 0
 			? process.env.XDG_STATE_HOME
 			: join(homedir(), ".local", "state");
-	return join(base, "omarchy", "agent-status", "sessions");
+	return join(base, "omarchy", "muster", "sessions");
 }
 
 function sanitize(value) {

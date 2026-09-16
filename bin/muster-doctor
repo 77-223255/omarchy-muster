@@ -1,22 +1,22 @@
 #!/bin/bash
 #
-# Dependency check for the shienze.agent-status plugin.
+# Dependency check for the shienze.muster plugin.
 #
 # The plugin has no build step and no package manager: it runs inside the
 # omarchy shell (Quickshell) and shells out to a handful of desktop tools.
 # This script reports every one of them, so a broken install is a one-command
 # diagnosis instead of a silent widget.
 #
-#   agent-status-doctor [--json]
+#   muster-doctor [--json]
 
 set -uo pipefail
 
 json=0
 [[ ${1:-} == "--json" ]] && json=1
 
-plugin_dir=${AGENT_STATUS_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/shienze.agent-status}
-state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agent-status/sessions
-pi_extension=$HOME/.pi/agent/extensions/agent-status.ts
+plugin_dir=${MUSTER_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/shienze.muster}
+state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster/sessions
+pi_extension=$HOME/.pi/agent/extensions/muster.ts
 
 ok=0
 missing=0
@@ -55,15 +55,15 @@ fi
 
 if omarchy-shell shell ping >/dev/null 2>&1; then
   record ok "shell running" "IPC reachable"
-  if omarchy plugin list --json 2>/dev/null | jq -e 'any(.[]; .id == "shienze.agent-status" and .enabled == true)' >/dev/null; then
-    record ok "plugin enabled" "shienze.agent-status is in the bar layout"
+  if omarchy plugin list --json 2>/dev/null | jq -e 'any(.[]; .id == "shienze.muster" and .enabled == true)' >/dev/null; then
+    record ok "plugin enabled" "shienze.muster is in the bar layout"
   else
-    record missing "plugin enabled" "run: omarchy plugin enable shienze.agent-status left"
+    record missing "plugin enabled" "run: omarchy plugin enable shienze.muster left"
   fi
-  if omarchy-shell shienze.agent-status status >/dev/null 2>&1; then
-    record ok "plugin IPC" "$(omarchy-shell shienze.agent-status status 2>/dev/null)"
+  if omarchy-shell shienze.muster status >/dev/null 2>&1; then
+    record ok "plugin IPC" "$(omarchy-shell shienze.muster status 2>/dev/null)"
   else
-    record missing "plugin IPC" "target shienze.agent-status not answering; omarchy restart shell"
+    record missing "plugin IPC" "target shienze.muster not answering; omarchy restart shell"
   fi
 else
   record missing "shell running" "omarchy-shell did not answer; omarchy restart shell"
@@ -97,11 +97,11 @@ if [[ -L $pi_extension || -f $pi_extension ]]; then
     record missing "pi bridge" "$pi_extension is a dangling symlink"
   fi
 else
-  record missing "pi bridge" "link pi/agent-status.ts into $HOME/.pi/agent/extensions/"
+  record missing "pi bridge" "link pi/muster.ts into $HOME/.pi/agent/extensions/"
 fi
 
-have jq "agent-status-report writes records with it"
-have flock "agent-status-report serializes concurrent writers"
+have jq "muster-report writes records with it"
+have flock "muster-report serializes concurrent writers"
 
 # --------------------------------------------------------------- alerts
 

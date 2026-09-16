@@ -13,7 +13,7 @@ import "Model.js" as Model
 //
 // Records are files. Any agent integration may write one JSON object per
 // session into the sessions directory — the bundled pi bridge, the
-// agent-status-report helper, a future hook. This service discovers, watches,
+// muster-report helper, a future hook. This service discovers, watches,
 // and reacts to them; it never guesses a state from anything else.
 Item {
   id: root
@@ -236,7 +236,7 @@ Item {
   function testAlert(session) {
     var subject = session && session.title ? session
       : (root.sessions.length > 0 ? root.sessions[0] : {
-        title: "Agent Status",
+        title: "Muster",
         agentLabel: "pi",
         lastPrompt: "Test alert",
         cwd: "",

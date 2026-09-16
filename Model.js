@@ -1,6 +1,6 @@
 .pragma library
 
-// Pure helpers for the agent-status plugin. Nothing here touches QML objects,
+// Pure helpers for the muster plugin. Nothing here touches QML objects,
 // so the file can be shared by the service, the bar widget and the panel.
 
 // Every agent omarchy ships as a selectable default (`omarchy default agent`),
@@ -182,5 +182,5 @@ function truncate(text, limit) {
 function stateDir(xdgStateHome, home) {
   var base = String(xdgStateHome || "")
   if (base === "") base = String(home || "") + "/.local/state"
-  return base + "/omarchy/agent-status/sessions"
+  return base + "/omarchy/muster/sessions"
 }

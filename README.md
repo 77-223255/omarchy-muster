@@ -1,18 +1,15 @@
-# Agent Status
+# Muster
 
 Live coding-agent sessions in the Omarchy bar, with a completion sound and a
 desktop notification — without running a terminal multiplexer.
 
 - **Bar chip** — one mark per agent that has a session, in the order that needs
-  attention (blocked first, then working). The marks are omarchy's own, the ones
-  its menu shows for `omarchy default agent`, so they are brand glyphs rather
-  than invented symbols. The window is deliberately short: past five marks it
-  clips and scrolls, the way the media widget runs a long track title, so a busy
-  bar never pushes the clock around.
-  The label is clipped to a capped width and scrolls through it when long, the
-  way omarchy's media widget runs a long track title, so a busy bar never pushes
-  the clock around. Always visible; a bell when nothing is running, because a
-  chip that disappears is a chip you cannot click.
+  attention (blocked first, then working). The marks are omarchy's own — the
+  ones its menu shows for `omarchy default agent` — so they are brand glyphs
+  rather than invented symbols. The window is deliberately short: past five
+  marks it clips and scrolls, the way the media widget runs a long track title,
+  so a busy bar never pushes the clock around. Always visible; a bell when
+  nothing is running, because a chip that disappears is a chip you cannot click.
 - **Panel** (click the chip) — one card per session: the agent's mark and the
   folder it is working in, then whatever the state has to say (the last prompt,
   or the message when it is blocked). No agent name on the card — the mark says
@@ -41,15 +38,15 @@ Adding an agent is therefore also exact: write records. See
 
 ```bash
 # 1. the shell plugin
-omarchy plugin add https://github.com/<you>/omarchy-agent-status.git --enable
-omarchy plugin enable shienze.agent-status left     # placement, if you skipped --enable
+omarchy plugin add https://github.com/<you>/omarchy-muster.git --enable
+omarchy plugin enable shienze.muster left     # placement, if you skipped --enable
 
 # 2. the pi bridge
-ln -sfn ~/.config/omarchy/plugins/shienze.agent-status/pi/agent-status.ts \
-        ~/.pi/agent/extensions/agent-status.ts
+ln -sfn ~/.config/omarchy/plugins/shienze.muster/pi/muster.ts \
+        ~/.pi/agent/extensions/muster.ts
 
 # 3. verify every dependency it shells out to
-~/.config/omarchy/plugins/shienze.agent-status/bin/agent-status-doctor
+~/.config/omarchy/plugins/shienze.muster/bin/muster-doctor
 ```
 
 Restart pi for the bridge to load. Changing a `.qml` file hot-reloads the
@@ -62,10 +59,10 @@ editing a checkout instead, point that path at the repo — the shell follows th
 symlink, and the plugin id still comes from `manifest.json`:
 
 ```bash
-git clone https://github.com/<you>/omarchy-agent-status.git ~/Projects/omarchy-agent-status
-ln -sfn ~/Projects/omarchy-agent-status ~/.config/omarchy/plugins/shienze.agent-status
+git clone https://github.com/<you>/omarchy-muster.git ~/Projects/omarchy-muster
+ln -sfn ~/Projects/omarchy-muster ~/.config/omarchy/plugins/shienze.muster
 omarchy-shell shell rescanPlugins
-omarchy plugin enable shienze.agent-status left
+omarchy plugin enable shienze.muster left
 ```
 
 ## Using it
@@ -76,10 +73,10 @@ omarchy plugin enable shienze.agent-status left
 | Bar chip | left click = panel, middle click = test alert |
 | Panel card | click = fire a test alert for that session |
 | Panel keys | `j`/`k` move, Enter fires the selected card's alert, `t` the first session's, Esc closes |
-| IPC | `omarchy-shell shienze.agent-status <open\|close\|toggle\|test\|status>` |
+| IPC | `omarchy-shell shienze.muster <open\|close\|toggle\|test\|status>` |
 
 ```bash
-omarchy-shell shienze.agent-status status | jq '.details[]'
+omarchy-shell shienze.muster status | jq '.details[]'
 # {"agent":"pi","state":"working","title":"shienze","cwd":"/home/shienze",
 #  "project":"shienze","pid":835161,"completedRuns":3,"window":"0x601dc3f347b0"}
 ```
@@ -108,7 +105,7 @@ live at the top of `Service.qml`:
 ## The record contract
 
 One JSON object per session in
-`$XDG_STATE_HOME/omarchy/agent-status/sessions/` (default
+`$XDG_STATE_HOME/omarchy/muster/sessions/` (default
 `~/.local/state/...`). Any filename ending in `.json`. Write it atomically
 (temp file + `rename`) and re-touch it as a heartbeat.
 
@@ -165,10 +162,10 @@ given). Adding an agent is one line in the `AGENTS` table at the top of
 
 ## Adding another agent
 
-`bin/agent-status-report` is the writer for everything that is not pi:
+`bin/muster-report` is the writer for everything that is not pi:
 
 ```bash
-report=~/.config/omarchy/plugins/shienze.agent-status/bin/agent-status-report
+report=~/.config/omarchy/plugins/shienze.muster/bin/muster-report
 
 $report --agent claude --session "$SESSION_ID" --state working \
         --name "Refactor auth" --cwd "$PWD" --prompt "$PROMPT"
@@ -184,7 +181,7 @@ without extra plumbing. A Claude Code `Stop` hook is then one line:
 ```jsonc
 // ~/.claude/settings.json
 { "hooks": { "Stop": [ { "hooks": [ { "type": "command",
-  "command": "~/.config/omarchy/plugins/shienze.agent-status/bin/agent-status-report --agent claude --session \"$CLAUDE_SESSION_ID\" --state idle --completed" } ] } ] } }
+  "command": "~/.config/omarchy/plugins/shienze.muster/bin/muster-report --agent claude --session \"$CLAUDE_SESSION_ID\" --state idle --completed" } ] } ] } }
 ```
 
 ### What omarchy does and does not provide
@@ -217,11 +214,11 @@ extension must be TypeScript.
 |-------|----------|-----------|
 | `Service.qml`, `BarWidget.qml`, `Panel.qml`, `Record.qml` | QML | omarchy shell (Quickshell, Qt 6), `hyprctl`, `find`, `mkdir` |
 | `Model.js` | JavaScript (QML engine) | nothing |
-| `pi/agent-status.ts` | TypeScript | pi's bundled Bun runtime; node builtins only, zero npm packages |
-| `bin/agent-status-report` | Bash | `jq`, `flock`, `hyprctl` |
+| `pi/muster.ts` | TypeScript | pi's bundled Bun runtime; node builtins only, zero npm packages |
+| `bin/muster-report` | Bash | `jq`, `flock`, `hyprctl` |
 | alerts | — | `paplay` (or `pw-play`/`mpv`) and `omarchy-notification-send` |
 
-`bin/agent-status-doctor` checks all of it (`--json` for machines) and exits
+`bin/muster-doctor` checks all of it (`--json` for machines) and exits
 non-zero only when something required is missing.
 
 Rust would not help here. It cannot be a Quickshell plugin or a pi extension,
@@ -251,21 +248,21 @@ its own small plugin, not here.
 | `Panel.qml` | session panel and the two toggles |
 | `Record.qml` | one watched session record |
 | `Model.js` | record normalization, ordering, formatting, agent glyphs |
-| `pi/agent-status.ts` | pi → record bridge |
-| `bin/agent-status-report` | record writer for other agents |
-| `bin/agent-status-doctor` | dependency check |
+| `pi/muster.ts` | pi → record bridge |
+| `bin/muster-report` | record writer for other agents |
+| `bin/muster-doctor` | dependency check |
 
 ## Troubleshooting
 
 ```bash
-omarchy-shell shienze.agent-status status | jq '.details[]'   # what the widget sees
-bin/agent-status-doctor                                        # dependencies
-journalctl --user --since "5 min ago" -o cat SYSLOG_IDENTIFIER=omarchy-shell | grep -i agent-status
-omarchy-shell shienze.agent-status test                        # prove the alert path
+omarchy-shell shienze.muster status | jq '.details[]'   # what the widget sees
+bin/muster-doctor                                        # dependencies
+journalctl --user --since "5 min ago" -o cat SYSLOG_IDENTIFIER=omarchy-shell | grep -i muster
+omarchy-shell shienze.muster test                        # prove the alert path
 ```
 
 - **Chip stays dim**: no record is being written. Run an agent, or write one by
-  hand with `agent-status-report`.
+  hand with `muster-report`.
 - **A session lingers after a crash**: it disappears `staleAfterSec` after the
   last heartbeat.
 - **No sound**: `command -v paplay`, and check the *Completion sound* toggle.

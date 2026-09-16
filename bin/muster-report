@@ -1,21 +1,21 @@
 #!/bin/bash
 
-# Writer for the shienze.agent-status shell plugin, for every agent that is not
+# Writer for the shienze.muster shell plugin, for every agent that is not
 # pi. Any integration can call this to publish a session record; the plugin
 # watches the sessions directory and never talks to the agent itself.
 #
 #   # a run started
-#   agent-status-report --agent claude --session "$ID" --state working \
+#   muster-report --agent claude --session "$ID" --state working \
 #     --name "Refactor auth" --cwd "$PWD" --prompt "refactor the auth module"
 #
 #   # a run finished (this is what triggers the sound + notification)
-#   agent-status-report --agent claude --session "$ID" --state idle --completed
+#   muster-report --agent claude --session "$ID" --state idle --completed
 #
 #   # waiting on the user
-#   agent-status-report --agent claude --session "$ID" --state blocked --message "approve the patch"
+#   muster-report --agent claude --session "$ID" --state blocked --message "approve the patch"
 #
 #   # gone
-#   agent-status-report --agent claude --session "$ID" --remove
+#   muster-report --agent claude --session "$ID" --remove
 #
 # `--agent` takes any id omarchy ships (pi, omp, opencode, claude, codex, crush,
 # grok, gemini, openclaw, hermes, copilot, muse, cursor-agent) plus their
@@ -25,7 +25,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: agent-status-report --agent <id> --session <id> [options]
+Usage: muster-report --agent <id> --session <id> [options]
 
   --state <working|blocked|idle|unknown>  Session state (default: working)
   --name <text>        Display name for the session
@@ -45,7 +45,7 @@ USAGE
 }
 
 fail() {
-  echo "agent-status-report: $*" >&2
+  echo "muster-report: $*" >&2
   exit 1
 }
 
@@ -90,7 +90,7 @@ esac
 
 sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
 
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agent-status/sessions"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster/sessions"
 mkdir -p "$state_dir"
 file="$state_dir/$(sanitize "$agent")-$(sanitize "$session").json"
 

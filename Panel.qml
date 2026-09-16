@@ -9,8 +9,8 @@ import "Model.js" as Model
 // session's terminal, and toggle the alerts.
 Panel {
   id: root
-  moduleName: "shienze.agent-status"
-  ipcTarget: "shienze.agent-status"
+  moduleName: "shienze.muster"
+  ipcTarget: "shienze.muster"
   manageIpc: false
 
   property var anchorItem: null
@@ -329,7 +329,7 @@ Panel {
           Text {
             width: parent.width
             visible: root.sessions.length === 0
-            text: "No agent sessions.\nRecords are read from ~/.local/state/omarchy/agent-status/sessions/ — an agent appears here once its bridge or hook writes one."
+            text: "No agent sessions.\nRecords are read from ~/.local/state/omarchy/muster/sessions/ — an agent appears here once its bridge or hook writes one."
             color: root.dimColor
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.bodySmall

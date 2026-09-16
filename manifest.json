@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "id": "shienze.agent-status",
-  "name": "Agent Status",
+  "id": "shienze.muster",
+  "name": "Muster",
   "version": "1.0.0",
   "author": "shienze",
   "license": "MIT",
@@ -13,10 +13,10 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Agent Status",
+    "displayName": "Muster",
     "description": "Running agent sessions with their live state; chimes and notifies when a run finishes.",
     "category": "AI",
-    "aliases": ["agent-status", "agent-sessions"],
+    "aliases": ["muster", "agent-sessions"],
     "allowMultiple": false,
     "defaultSection": "left",
     "defaults": {

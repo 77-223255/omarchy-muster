@@ -35,7 +35,7 @@ Item {
       var parsed = JSON.parse(String(content || ""))
       root.record = parsed && typeof parsed === "object" ? parsed : null
     } catch (e) {
-      console.warn("agent-status", "Ignoring bad session record", root.path, e)
+      console.warn("muster", "Ignoring bad session record", root.path, e)
       root.record = null
     }
   }
