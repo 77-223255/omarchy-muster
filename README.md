@@ -40,9 +40,9 @@ Adding an agent is therefore also exact: write records. See
 ## Install
 
 ```bash
-# 1. the shell plugin (this directory)
-omarchy-shell shell rescanPlugins
-omarchy plugin enable shienze.agent-status left
+# 1. the shell plugin
+omarchy plugin add https://github.com/<you>/omarchy-agent-status.git --enable
+omarchy plugin enable shienze.agent-status left     # placement, if you skipped --enable
 
 # 2. the pi bridge
 ln -sfn ~/.config/omarchy/plugins/shienze.agent-status/pi/agent-status.ts \
@@ -52,9 +52,23 @@ ln -sfn ~/.config/omarchy/plugins/shienze.agent-status/pi/agent-status.ts \
 ~/.config/omarchy/plugins/shienze.agent-status/bin/agent-status-doctor
 ```
 
-Restart pi for the bridge to load. Changing a `.qml` file here hot-reloads the
+Restart pi for the bridge to load. Changing a `.qml` file hot-reloads the
 widget, except the IPC target: after edits, `omarchy restart shell`.
 
+### Working from a checkout
+
+`omarchy plugin add` clones into `~/.config/omarchy/plugins/<id>/`. To keep
+editing a checkout instead, point that path at the repo — the shell follows the
+symlink, and the plugin id still comes from `manifest.json`:
+
+```bash
+git clone https://github.com/<you>/omarchy-agent-status.git ~/Projects/omarchy-agent-status
+ln -sfn ~/Projects/omarchy-agent-status ~/.config/omarchy/plugins/shienze.agent-status
+omarchy-shell shell rescanPlugins
+omarchy plugin enable shienze.agent-status left
+```
+
+## Using it
 ## Using it
 
 | Where | Action |
