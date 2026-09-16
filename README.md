@@ -1,5 +1,7 @@
 # Muster
 
+**English** · [中文](README.zh.md)
+
 Live coding-agent sessions in the Omarchy bar, with a completion sound and a
 desktop notification — without running a terminal multiplexer.
 
@@ -13,8 +15,8 @@ desktop notification — without running a terminal multiplexer.
 - **Panel** (click the chip) — one card per session: the agent's mark and the
   folder it is working in, then whatever the state has to say (the last prompt,
   or the message when it is blocked). No agent name on the card — the mark says
-  who, the folder says where. The card interior is always the same grey;
-  the state lives on the rim and in the title: a working card gets a soft
+  who, the folder says where. The card interior is always the same grey; the
+  state lives on the rim and in the title: a working card gets a soft
   theme-coloured rim that breathes, a blocked card the urgent colour, idle
   nothing. No elapsed timers: the panel answers "is anything running and does it
   need me".
@@ -22,6 +24,16 @@ desktop notification — without running a terminal multiplexer.
   Clicking the notification focuses that session's terminal. **Clicking a card**
   fires the same alert on demand for that session, with `test` in the
   notification title so it cannot be mistaken for a real completion.
+
+## Screenshots
+
+<!-- Drop your captures in assets/ and uncomment. The marketplace also picks up
+     one optional preview.png in the repository root (JPEG/WebP/AVIF work too;
+     it is optimized automatically, up to 50 MB / 40 megapixels). -->
+
+<!-- ![The panel](assets/panel.png) -->
+
+<!-- ![The bar chip](assets/chip.png) -->
 
 ## How it gets state
 
@@ -38,7 +50,7 @@ Adding an agent is therefore also exact: write records. See
 
 ```bash
 # 1. the shell plugin
-omarchy plugin add https://github.com/<you>/omarchy-muster.git --enable
+omarchy plugin add https://github.com/77-223255/omarchy-muster.git --enable
 omarchy plugin enable shienze.muster left     # placement, if you skipped --enable
 
 # 2. the pi bridge
@@ -59,13 +71,39 @@ editing a checkout instead, point that path at the repo — the shell follows th
 symlink, and the plugin id still comes from `manifest.json`:
 
 ```bash
-git clone https://github.com/<you>/omarchy-muster.git ~/Projects/omarchy-muster
+git clone https://github.com/77-223255/omarchy-muster.git ~/Projects/omarchy-muster
 ln -sfn ~/Projects/omarchy-muster ~/.config/omarchy/plugins/shienze.muster
 omarchy-shell shell rescanPlugins
 omarchy plugin enable shienze.muster left
 ```
 
-## Using it
+## Removal
+
+```bash
+# 1. the pi bridge
+rm -f ~/.pi/agent/extensions/muster.ts
+
+# 2. the shell plugin (removes the bar entry and the plugin directory)
+omarchy plugin disable shienze.muster
+omarchy plugin remove shienze.muster
+
+# 3. the session records it read
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster"
+```
+
+`omarchy plugin remove` deletes the plugin directory and its entry in
+`~/.config/omarchy/shell.json`, and nothing else. If you installed from a
+checkout with the symlink above, delete the symlink and your clone instead:
+
+```bash
+rm -f ~/.config/omarchy/plugins/shienze.muster
+rm -rf ~/Projects/omarchy-muster
+```
+
+No file outside `~/.config/omarchy/`, `~/.local/state/omarchy/muster/` and the
+pi bridge symlink is touched, and no user configuration is overwritten without
+you doing it from the panel.
+
 ## Using it
 
 | Where | Action |
@@ -77,8 +115,8 @@ omarchy plugin enable shienze.muster left
 
 ```bash
 omarchy-shell shienze.muster status | jq '.details[]'
-# {"agent":"pi","state":"working","title":"shienze","cwd":"/home/shienze",
-#  "project":"shienze","pid":835161,"completedRuns":3,"window":"0x601dc3f347b0"}
+# {"agent":"pi","state":"working","folder":"tiny-model-primitives",
+#  "pid":835161,"completedRuns":3,"window":"0x601dc3f347b0"}
 ```
 
 ## Settings
@@ -129,20 +167,20 @@ once.
 
 ## The agents omarchy ships
 
-All thirteen agents `omarchy default agent` accepts are known by name — the
-panel shows the name, the chip shows the mark — plus the aliases that command
-takes: `claude-code`, `oh-my-pi`, `open-code`, `cursor`, `github-copilot`,
-`gemini-cli`, `muse-code`, … A record written under an alias folds into the
-canonical agent instead of becoming a second one.
+All thirteen agents `omarchy default agent` accepts are known by name, plus the
+aliases that command takes: `claude-code`, `oh-my-pi`, `open-code`, `cursor`,
+`github-copilot`, `gemini-cli`, `muse-code`, … A record written under an alias
+folds into the canonical agent instead of becoming a second one.
 
-Marks come from `setup.default.agent.*` in
+The bar chip draws each agent with omarchy's own mark, taken from
+`setup.default.agent.*` in
 `/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc`: eight are brand glyphs
-in `/usr/share/fonts/omarchy/omarchy.ttf` (U+E901…U+E90D) and five are Nerd Font
-glyphs, exactly as omarchy's own menu draws them.
+in `/usr/share/fonts/omarchy/omarchy.ttf` (U+E901…U+E90D) and five are Nerd
+Font glyphs, exactly as omarchy's own menu draws them.
 
 | id | shown as | also accepts |
 |----|----------|--------------|
-| `pi` | `π` | `pi-coding-agent` |
+| `pi` | Pi | `pi-coding-agent` |
 | `omp` | Oh My Pi | `oh-my-pi` |
 | `opencode` | OpenCode | `open-code` |
 | `claude` | Claude | `claude-code`, `anthropic` |
@@ -247,16 +285,17 @@ its own small plugin, not here.
 | `BarWidget.qml` | bar chip, settings push, IPC |
 | `Panel.qml` | session panel and the two toggles |
 | `Record.qml` | one watched session record |
-| `Model.js` | record normalization, ordering, formatting, agent glyphs |
+| `Model.js` | record normalization, ordering, agent names and marks |
 | `pi/muster.ts` | pi → record bridge |
 | `bin/muster-report` | record writer for other agents |
 | `bin/muster-doctor` | dependency check |
+| `docs/marketplace-submission.md` | the exact text for a marketplace listing issue |
 
 ## Troubleshooting
 
 ```bash
 omarchy-shell shienze.muster status | jq '.details[]'   # what the widget sees
-bin/muster-doctor                                        # dependencies
+~/.config/omarchy/plugins/shienze.muster/bin/muster-doctor   # dependencies
 journalctl --user --since "5 min ago" -o cat SYSLOG_IDENTIFIER=omarchy-shell | grep -i muster
 omarchy-shell shienze.muster test                        # prove the alert path
 ```
@@ -267,3 +306,7 @@ omarchy-shell shienze.muster test                        # prove the alert path
   last heartbeat.
 - **No sound**: `command -v paplay`, and check the *Completion sound* toggle.
 - **IPC function missing after an edit**: `omarchy restart shell`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
