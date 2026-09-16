@@ -318,7 +318,7 @@ Panel {
             width: parent.width
             foreground: root.contentForeground
             fontFamily: root.contentFontFamily
-            title: "Agents"
+            title: "Muster"
             meta: root.sessions.length === 0
               ? "NOTHING RUNNING"
               : (root.summary.blocked > 0
