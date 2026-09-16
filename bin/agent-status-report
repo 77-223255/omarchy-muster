@@ -1,0 +1,189 @@
+#!/bin/bash
+
+# Writer for the shienze.agent-status shell plugin, for every agent that is not
+# pi. Any integration can call this to publish a session record; the plugin
+# watches the sessions directory and never talks to the agent itself.
+#
+#   # a run started
+#   agent-status-report --agent claude --session "$ID" --state working \
+#     --name "Refactor auth" --cwd "$PWD" --prompt "refactor the auth module"
+#
+#   # a run finished (this is what triggers the sound + notification)
+#   agent-status-report --agent claude --session "$ID" --state idle --completed
+#
+#   # waiting on the user
+#   agent-status-report --agent claude --session "$ID" --state blocked --message "approve the patch"
+#
+#   # gone
+#   agent-status-report --agent claude --session "$ID" --remove
+#
+# `--agent` takes any id omarchy ships (pi, omp, opencode, claude, codex, crush,
+# grok, gemini, openclaw, hermes, copilot, muse, cursor-agent) plus their
+# aliases; an unknown id still works and gets the generic mark.
+
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: agent-status-report --agent <id> --session <id> [options]
+
+  --state <working|blocked|idle|unknown>  Session state (default: working)
+  --name <text>        Display name for the session
+  --cwd <path>         Working directory (default: $PWD)
+  --prompt <text>      Last user prompt, shown on the panel card
+  --message <text>     Detail for a blocked session
+  --pid <n>            Owning process id (default: $PPID)
+  --window <value>     Hyprland window address, "auto" (default) or "none"
+  --completed          Increment completedRuns: a run just settled
+  --remove             Delete the record and exit
+  --json               Print the resulting record
+  -h, --help           This text
+
+Environment:
+  XDG_STATE_HOME       Defaults to ~/.local/state
+USAGE
+}
+
+fail() {
+  echo "agent-status-report: $*" >&2
+  exit 1
+}
+
+agent=""
+session=""
+state="working"
+name=""
+cwd="$PWD"
+prompt=""
+message=""
+pid="$PPID"
+window="auto"
+completed=0
+remove=0
+print_json=0
+
+while (($# > 0)); do
+  case "$1" in
+  --agent) agent="${2:-}"; shift 2 ;;
+  --session) session="${2:-}"; shift 2 ;;
+  --state) state="${2:-}"; shift 2 ;;
+  --name) name="${2:-}"; shift 2 ;;
+  --cwd) cwd="${2:-}"; shift 2 ;;
+  --prompt) prompt="${2:-}"; shift 2 ;;
+  --message) message="${2:-}"; shift 2 ;;
+  --pid) pid="${2:-}"; shift 2 ;;
+  --window) window="${2:-}"; shift 2 ;;
+  --completed) completed=1; shift ;;
+  --remove) remove=1; shift ;;
+  --json) print_json=1; shift ;;
+  -h | --help) usage; exit 0 ;;
+  *) fail "unknown option: $1" ;;
+  esac
+done
+
+[[ -n $agent ]] || fail "--agent is required"
+[[ -n $session ]] || fail "--session is required"
+case "$state" in
+working | blocked | idle | unknown) ;;
+*) fail "--state must be working, blocked, idle, or unknown" ;;
+esac
+
+sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agent-status/sessions"
+mkdir -p "$state_dir"
+file="$state_dir/$(sanitize "$agent")-$(sanitize "$session").json"
+
+if ((remove)); then
+  rm -f "$file" "$file.lock"
+  exit 0
+fi
+
+# ------------------------------------------------------------- window id
+#
+# Walk our own parent chain and match it against the compositor's window list:
+# hyprctl reports the pid of the process that owns each window, normally the
+# terminal emulator.
+
+resolve_window() {
+  local current="$1" stat chain=() address="" i
+  for ((i = 0; i < 16; i++)); do
+    ((current > 1)) || break
+    chain+=("$current")
+    stat=$(cat "/proc/$current/stat" 2>/dev/null) || break
+    current=$(awk '{print $2}' <<<"${stat##*)}")
+    [[ $current =~ ^[0-9]+$ ]] || break
+  done
+  (( ${#chain[@]} > 0 )) || return 0
+  local clients
+  clients=$(hyprctl -j clients 2>/dev/null) || return 0
+  for current in "${chain[@]}"; do
+    address=$(jq -r --argjson pid "$current" \
+      '.[] | select(.pid == $pid) | .address' <<<"$clients" 2>/dev/null | head -n1)
+    if [[ -n $address && $address != null ]]; then
+      printf '%s' "$address"
+      return 0
+    fi
+  done
+}
+
+window_address=""
+case "$window" in
+none) ;;
+auto) window_address=$(resolve_window "$pid" || true) ;;
+*) window_address="$window" ;;
+esac
+
+# ------------------------------------------------------------ read/modify
+
+exec 9>"$file.lock"
+flock -x 9
+
+if [[ -f $file ]]; then
+  old=$(<"$file")
+  jq -e . >/dev/null 2>&1 <<<"$old" || old='{}'
+else
+  old='{}'
+fi
+
+now=$(date +%s%3N)
+project=$(basename "${cwd%/}")
+
+merged=$(jq -c \
+  --arg agent "$agent" \
+  --arg session "$session" \
+  --arg state "$state" \
+  --arg name "$name" \
+  --arg cwd "$cwd" \
+  --arg project "$project" \
+  --arg prompt "$prompt" \
+  --arg message "$message" \
+  --argjson pid "${pid:-0}" \
+  --arg window "$window_address" \
+  --argjson now "$now" \
+  --argjson completed "$completed" \
+  '
+  . as $old
+  | {
+      schemaVersion: 1,
+      agent: $agent,
+      sessionId: $session,
+      name: (if $name != "" then $name else ($old.name // "") end),
+      cwd: (if $cwd != "" then $cwd else ($old.cwd // "") end),
+      project: (if $project != "" then $project else ($old.project // "") end),
+      state: $state,
+      message: (if $state == "blocked" then $message else "" end),
+      lastPrompt: (if $prompt != "" then $prompt else ($old.lastPrompt // "") end),
+      pid: $pid,
+      windowAddress: $window,
+      updatedAt: $now,
+      completedRuns: (($old.completedRuns // 0) + $completed),
+      seq: (($old.seq // 0) + 1)
+    }
+  ' <<<"$old")
+
+printf '%s' "$merged" >"$file.tmp"
+mv -f "$file.tmp" "$file"
+
+((print_json)) && printf '%s\n' "$merged"
+exit 0

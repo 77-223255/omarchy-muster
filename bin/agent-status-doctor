@@ -1,0 +1,144 @@
+#!/bin/bash
+#
+# Dependency check for the shienze.agent-status plugin.
+#
+# The plugin has no build step and no package manager: it runs inside the
+# omarchy shell (Quickshell) and shells out to a handful of desktop tools.
+# This script reports every one of them, so a broken install is a one-command
+# diagnosis instead of a silent widget.
+#
+#   agent-status-doctor [--json]
+
+set -uo pipefail
+
+json=0
+[[ ${1:-} == "--json" ]] && json=1
+
+plugin_dir=${AGENT_STATUS_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/shienze.agent-status}
+state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agent-status/sessions
+pi_extension=$HOME/.pi/agent/extensions/agent-status.ts
+
+ok=0
+missing=0
+optional=0
+rows=()
+
+record() {
+  # record <status> <name> <detail>
+  rows+=("$1|$2|$3")
+  case $1 in
+  ok) ok=$((ok + 1)) ;;
+  missing) missing=$((missing + 1)) ;;
+  *) optional=$((optional + 1)) ;;
+  esac
+}
+
+have() {
+  # have <command> <why> [required]
+  local cmd=$1 why=$2 required=${3:-required}
+  if command -v "$cmd" >/dev/null 2>&1; then
+    record ok "$cmd" "$(command -v "$cmd") · $why"
+  elif [[ $required == required ]]; then
+    record missing "$cmd" "$why"
+  else
+    record optional "$cmd" "$why (optional)"
+  fi
+}
+
+# ------------------------------------------------------------- runtime
+
+if command -v quickshell >/dev/null 2>&1; then
+  record ok quickshell "$(quickshell --version 2>/dev/null || echo present) · hosts the plugin"
+else
+  record missing quickshell "the omarchy shell host; without it no plugin runs"
+fi
+
+if omarchy-shell shell ping >/dev/null 2>&1; then
+  record ok "shell running" "IPC reachable"
+  if omarchy plugin list --json 2>/dev/null | jq -e 'any(.[]; .id == "shienze.agent-status" and .enabled == true)' >/dev/null; then
+    record ok "plugin enabled" "shienze.agent-status is in the bar layout"
+  else
+    record missing "plugin enabled" "run: omarchy plugin enable shienze.agent-status left"
+  fi
+  if omarchy-shell shienze.agent-status status >/dev/null 2>&1; then
+    record ok "plugin IPC" "$(omarchy-shell shienze.agent-status status 2>/dev/null)"
+  else
+    record missing "plugin IPC" "target shienze.agent-status not answering; omarchy restart shell"
+  fi
+else
+  record missing "shell running" "omarchy-shell did not answer; omarchy restart shell"
+fi
+
+# ------------------------------------------------------------ detection
+
+if [[ -f $plugin_dir/Service.qml && -f $plugin_dir/BarWidget.qml && -f $plugin_dir/Panel.qml \
+      && -f $plugin_dir/Record.qml && -f $plugin_dir/Model.js ]]; then
+  record ok "plugin source" "$plugin_dir"
+else
+  record missing "plugin source" "$plugin_dir is missing Service/BarWidget/Panel/Record/Model files"
+fi
+
+have hyprctl "focusing an agent's terminal on click"
+have find "enumerating session records"
+have mkdir "creating the sessions directory"
+
+if [[ -d $state_dir ]]; then
+  record ok "sessions dir" "$state_dir ($(find "$state_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l) record(s))"
+else
+  record optional "sessions dir" "$state_dir (created on first write)"
+fi
+
+# -------------------------------------------------------------- writers
+
+if [[ -L $pi_extension || -f $pi_extension ]]; then
+  if [[ -f $pi_extension ]]; then
+    record ok "pi bridge" "$(readlink -f "$pi_extension")"
+  else
+    record missing "pi bridge" "$pi_extension is a dangling symlink"
+  fi
+else
+  record missing "pi bridge" "link pi/agent-status.ts into $HOME/.pi/agent/extensions/"
+fi
+
+have jq "agent-status-report writes records with it"
+have flock "agent-status-report serializes concurrent writers"
+
+# --------------------------------------------------------------- alerts
+
+if command -v paplay >/dev/null 2>&1 || command -v pw-play >/dev/null 2>&1 || command -v mpv >/dev/null 2>&1; then
+  record ok "audio player" "$(command -v paplay || command -v pw-play || command -v mpv)"
+else
+  record missing "audio player" "install pipewire (paplay/pw-play) or mpv for the completion sound"
+fi
+
+sound_file=/usr/share/sounds/freedesktop/stereo/complete.oga
+if [[ -r $sound_file ]]; then
+  record ok "sound file" "$sound_file"
+else
+  record optional "sound file" "$sound_file not readable; change soundFile in the widget settings"
+fi
+
+have omarchy-notification-send "the desktop popup on completion"
+
+# ---------------------------------------------------------------- output
+
+if ((json)); then
+  printf '%s\n' "${rows[@]}" | jq -Rn '
+    [inputs | split("|") | {status: .[0], name: .[1], detail: .[2]}]
+    | {ok: (map(select(.status == "ok")) | length),
+       optional: (map(select(.status == "optional")) | length),
+       missing: (map(select(.status == "missing")) | length),
+       checks: .}'
+else
+  for row in "${rows[@]}"; do
+    IFS='|' read -r status name detail <<<"$row"
+    case $status in
+    ok) printf '  \033[32m✓\033[0m %-22s %s\n' "$name" "$detail" ;;
+    missing) printf '  \033[31m✗\033[0m %-22s %s\n' "$name" "$detail" ;;
+    *) printf '  \033[33m·\033[0m %-22s %s\n' "$name" "$detail" ;;
+    esac
+  done
+  printf '\n  %d ok, %d missing, %d optional\n' "$ok" "$missing" "$optional"
+fi
+
+((missing == 0))

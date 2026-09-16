@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "shienze.agent-status",
+  "name": "Agent Status",
+  "version": "1.0.0",
+  "author": "shienze",
+  "license": "MIT",
+  "description": "Live status for local coding agents in the Omarchy bar, with a completion sound and notification.",
+  "kinds": ["service", "bar-widget"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Agent Status",
+    "description": "Running agent sessions with their live state; chimes and notifies when a run finishes.",
+    "category": "AI",
+    "aliases": ["agent-status", "agent-sessions"],
+    "allowMultiple": false,
+    "defaultSection": "left",
+    "defaults": {
+      "soundEnabled": true,
+      "notifyEnabled": true
+    },
+    "schema": [
+      { "key": "soundEnabled", "type": "boolean", "label": "Play a sound when a run finishes", "defaultValue": true },
+      { "key": "notifyEnabled", "type": "boolean", "label": "Send a desktop notification when a run finishes", "defaultValue": true }
+    ]
+  }
+}
