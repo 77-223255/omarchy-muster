@@ -6,7 +6,10 @@ Live coding-agent sessions in the Omarchy bar, with a completion sound and a
 desktop notification — without running a terminal multiplexer.
 
 - **Bar chip** — one mark per agent that has a session, in the order that needs
-  attention (blocked first, then working). The marks are omarchy's own — the
+  attention (blocked first, then working). Each mark is coloured by its own
+  session's state — the urgent colour when that agent is blocked, the theme
+  accent while it runs, plain bar text when it is idle — so a mixed bar reads at
+  a glance instead of turning one colour. The marks are omarchy's own — the
   ones its menu shows for `omarchy default agent` — so they are brand glyphs
   rather than invented symbols. The window is deliberately short: past five
   marks it clips and scrolls, the way the media widget runs a long track title,
@@ -27,13 +30,12 @@ desktop notification — without running a terminal multiplexer.
 
 ## Screenshots
 
-<!-- Drop your captures in assets/ and uncomment. The marketplace also picks up
-     one optional preview.png in the repository root (JPEG/WebP/AVIF work too;
-     it is optimized automatically, up to 50 MB / 40 megapixels). -->
+![The panel](assets/panel.png)
 
-<!-- ![The panel](assets/panel.png) -->
+![The bar chip](assets/chip.png)
 
-<!-- ![The bar chip](assets/chip.png) -->
+Captures live in [`assets/`](assets/README.md); the marketplace listing card is
+one optional root `preview.png`.
 
 ## How it gets state
 
@@ -289,7 +291,10 @@ its own small plugin, not here.
 | `pi/muster.ts` | pi → record bridge |
 | `bin/muster-report` | record writer for other agents |
 | `bin/muster-doctor` | dependency check |
-| `docs/marketplace-submission.md` | the exact text for a marketplace listing issue |
+| `assets/` | README screenshots |
+| `preview.png` | root listing card for the marketplace (optional) |
+| `docs/submission-body.md` | the exact issue body for a marketplace listing |
+| `docs/marketplace-submission.md` | how to file that issue |
 
 ## Troubleshooting
 

@@ -6,7 +6,9 @@
 完成时还有提示音和系统弹窗,不需要开任何终端复用器。
 
 - **状态栏图标** —— 每个有会话的 agent 一个标记,按"谁更急"排序(先 blocked,
-  再 working)。标记用的是 **omarchy 自己的品牌字形**(`omarchy default agent`
+  再 working)。每个标记按**自己那个会话的状态**着色:blocked 用警示色、working 用
+  主题强调色、idle 用状态栏文字色 —— 混在一起也能一眼分清,而不是整条图标全变成
+  同一种颜色。标记用的是 **omarchy 自己的品牌字形**(`omarchy default agent`
   菜单里用的那一套),不是我自己凑的符号。窗口刻意做窄:超过 5 个标记就裁剪并
   滚动(和 omarchy 媒体插件跑长歌名的方式一样),再忙也不会把时钟挤走。它始终
   显示;没有会话时是一枚铃铛 —— 会消失的图标是点不开的图标。
@@ -21,12 +23,12 @@
 
 ## 截图
 
-<!-- 把你的截图放进 assets/ 再取消注释。市场另外会自动抓取仓库根目录下的
-     一个 preview.png(也接受 JPEG/WebP/AVIF,上限 50 MB / 4000 万像素)。 -->
+![面板](assets/panel.png)
 
-<!-- ![面板](assets/panel.png) -->
+![状态栏图标](assets/chip.png)
 
-<!-- ![状态栏图标](assets/chip.png) -->
+截图放在 [`assets/`](assets/README.md);市场列表卡片是仓库根目录下可选的一个
+`preview.png`。
 
 ## 状态是怎么来的
 
@@ -264,7 +266,10 @@ $report --agent claude --session "$SESSION_ID" --remove
 | `pi/muster.ts` | pi → 记录 桥接 |
 | `bin/muster-report` | 给其它 agent 的记录写入器 |
 | `bin/muster-doctor` | 依赖体检 |
-| `docs/marketplace-submission.md` | 提交到插件市场的原文 |
+| `assets/` | README 截图 |
+| `preview.png` | 市场列表卡片(可选,放根目录) |
+| `docs/submission-body.md` | 提交 issue 的正文 |
+| `docs/marketplace-submission.md` | 如何提交那个 issue |
 
 ## 排查
 
