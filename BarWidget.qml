@@ -45,9 +45,25 @@ BarWidget {
     return root.horizontal ? marks : marks.slice(0, 1)
   }
 
-  readonly property color chipColor: anyBlocked
-    ? (bar ? bar.urgent : Color.urgent)
-    : (anyWorking ? Color.accent : (bar ? bar.barForeground : Color.foreground))
+  readonly property color chipForeground: bar ? bar.barForeground : Color.foreground
+
+  // Every mark carries the state of its own session, the way a panel card puts
+  // the state on its rim and title: blocked is the urgent colour, a running
+  // agent the theme accent, an idle one plain bar text. A record that never
+  // reported a state we recognise fades back instead of pretending to be idle.
+  //
+  // This replaced a single chip-wide colour, which painted every mark red as
+  // soon as one session was blocked -- true about the chip, wrong about the
+  // sessions, and unreadable past two marks. The chip as a whole still tracks
+  // the aggregate (the button's active tint below), so "something needs you"
+  // stays visible at a glance.
+  function markColor(state) {
+    if (state === "blocked") return bar ? bar.urgent : Color.urgent
+    if (state === "working") return Color.accent
+    if (state === "idle") return chipForeground
+    return Util.alpha(chipForeground, 0.45)
+  }
+
   readonly property string chipFont: bar ? bar.fontFamily : Style.font.family
 
   // Long content scrolls rather than pushing the bar around: the visible width
@@ -233,7 +249,7 @@ BarWidget {
           textFormat: Text.PlainText
           text: modelData === null ? Model.IDLE_GLYPH
             : (modelData.agentIcon !== "" ? modelData.agentIcon : modelData.agentLabel)
-          color: root.chipColor
+          color: modelData === null ? root.chipForeground : root.markColor(modelData.state)
           font.family: modelData && modelData.agentFont === "omarchy" ? "omarchy" : root.chipFont
           font.pixelSize: Style.bar.iconFont
           renderType: Text.NativeRendering
