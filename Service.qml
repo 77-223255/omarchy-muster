@@ -38,8 +38,17 @@ Item {
     var cut = d.lastIndexOf("/")
     return (cut > 0 ? d.slice(0, cut) : d) + "/marks"
   }
+  // Notification API note: org.freedesktop.Notifications has no colour field,
+  // so a colour cannot ride the toast itself. These marks are our own SVGs,
+  // though, so the fill is ours to choose — brand and Nerd Font marks alike.
+  // They mirror the bar/panel palette: blocked urgent, working accent, idle
+  // the notification text colour.
   readonly property color notificationText: Color.notifications.text
+  readonly property color notificationAccent: Color.accent
+  readonly property color notificationUrgent: Color.urgent
   onNotificationTextChanged: root.writeMarks()
+  onNotificationAccentChanged: root.writeMarks()
+  onNotificationUrgentChanged: root.writeMarks()
 
   function hexColor(c) {
     function pair(v) {
@@ -49,21 +58,31 @@ Item {
     return "#" + pair(c.r) + pair(c.g) + pair(c.b)
   }
 
-  // One line per brand agent: id then the omarchy font codepoint. Kept in
-  // sync with Model.js's AGENTS table (every mark with font: "omarchy").
+  // One line per agent: id, font family, codepoint. Kept in sync with
+  // Model.js's AGENTS table. Brand marks use omarchy's own font; Nerd Font
+  // marks use the monospace alias, which is the font the toast's glyph hint
+  // would resolve to anyway. Each agent gets the three state colours.
   readonly property string markScript: [
     "dir=\"$1\"",
-    "color=\"$2\"",
+    "text=\"$2\"",
+    "accent=\"$3\"",
+    "urgent=\"$4\"",
     "mkdir -p \"$dir\"",
-    "mark() { printf \"%s\" \"<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'><text x='32' y='62' font-family='omarchy' font-size='60' text-anchor='middle' fill='$color'>&#x$2;</text></svg>\" > \"$dir/$1.svg\"; }",
-    "mark pi E901",
-    "mark opencode E902",
-    "mark omp E903",
-    "mark grok E904",
-    "mark codex E905",
-    "mark hermes E90A",
-    "mark openclaw E90C",
-    "mark cursor-agent E90D"
+    "write() { printf \"%s\" \"<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'><text x='32' y='$5' font-family='$2' font-size='56' text-anchor='middle' fill='$4'>&#x$3;</text></svg>\" > \"$dir/$1.svg\"; }",
+    "mark() { write \"$1\" \"$2\" \"$3\" \"$text\" \"$4\"; write \"$1-working\" \"$2\" \"$3\" \"$accent\" \"$4\"; write \"$1-blocked\" \"$2\" \"$3\" \"$urgent\" \"$4\"; }",
+    "mark pi omarchy E901 60",
+    "mark opencode omarchy E902 60",
+    "mark omp omarchy E903 60",
+    "mark grok omarchy E904 60",
+    "mark codex omarchy E905 60",
+    "mark hermes omarchy E90A 60",
+    "mark openclaw omarchy E90C 60",
+    "mark cursor-agent omarchy E90D 60",
+    "mark claude monospace F06C4 54",
+    "mark copilot monospace F4B8 54",
+    "mark crush monospace F02D1 54",
+    "mark gemini monospace F0AE2 54",
+    "mark muse monospace F06E4 54"
   ].join("\n")
 
   function writeMarks() {
@@ -119,7 +138,9 @@ Item {
   Process {
     id: markWriter
     running: false
-    command: ["bash", "-c", root.markScript, "muster-marks", root.marksDir, root.hexColor(root.notificationText)]
+    command: ["bash", "-c", root.markScript, "muster-marks", root.marksDir,
+      root.hexColor(root.notificationText), root.hexColor(root.notificationAccent),
+      root.hexColor(root.notificationUrgent)]
   }
 
   Timer {
@@ -265,14 +286,13 @@ Item {
   }
 
   function notificationCommand(session, isTest) {
-    var subject = (isTest === true ? "test  ·  " : "") + session.title
+    var subject = (isTest === true ? "test  ·  " : "alert  ·  ") + session.title
     var args = ["omarchy-notification-send", "-u", "normal"]
     var mark = String(session.agentIcon || "")
     if (mark !== "") {
-      if (session.agentFont === "omarchy")
-        args = args.concat(["-i", root.marksDir + "/" + session.agent + ".svg"])
-      else
-        args = args.concat(["-g", mark])
+      var state = session.state === "working" ? "-working"
+        : (session.state === "blocked" ? "-blocked" : "")
+      args = args.concat(["-i", root.marksDir + "/" + session.agent + state + ".svg"])
     }
     args = args.concat([
       subject,
