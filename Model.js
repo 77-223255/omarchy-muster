@@ -176,7 +176,11 @@ function stateLabel(state) {
 function truncate(text, limit) {
   var value = String(text || "").replace(/\s+/g, " ").trim()
   if (value.length <= limit) return value
-  return value.slice(0, Math.max(0, limit - 1)).trimEnd() + "…"
+  // QML's JS engine has no String.prototype.trimEnd (ES2019), so drop the
+  // trailing space with a regex instead. Short text returns above and never
+  // reached this line, which is why only long prompts broke the panel card
+  // and the notification body.
+  return value.slice(0, Math.max(0, limit - 1)).replace(/\s+$/, "") + "…"
 }
 
 function stateDir(xdgStateHome, home) {
