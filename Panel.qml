@@ -311,7 +311,12 @@ Panel {
 
         Column {
           id: mainColumn
-          width: panelScroll.width
+          // Keep the content one hairline off the Flickable's clip edge: a
+          // 1px border drawn exactly on that edge is dropped by the clip, so
+          // an idle card's left rim vanished. Two hairlines of width cost
+          // nothing visible and keep every rim inside.
+          x: Style.spacing.hairline
+          width: panelScroll.width - Style.spacing.hairline * 2
           spacing: Style.spacing.xxxl
 
           PanelHero {
@@ -353,22 +358,32 @@ Panel {
             }
           }
 
-          PanelSeparator { foreground: root.contentForeground }
-
           Row {
+            id: tiles
             width: parent.width
             spacing: 0
 
+            readonly property int dividerWidth: Style.spacing.hairline
+            readonly property int leftWidth: Math.floor((width - dividerWidth) / 2)
+
             SettingTile {
-              width: Math.floor(parent.width / 2)
+              width: tiles.leftWidth
               outerLeft: true
               label: "Sound"
               checked: root.setting("soundEnabled", true) === true
               onClicked: root.persist({ soundEnabled: !checked })
             }
 
+            // The pair reads as one segmented control, so the inner seam keeps
+            // a split line even though the section separator is gone.
+            Rectangle {
+              width: tiles.dividerWidth
+              height: Style.space(44)
+              color: Qt.rgba(0, 0, 0, 0.28)
+            }
+
             SettingTile {
-              width: parent.width - Math.floor(parent.width / 2)
+              width: tiles.width - tiles.leftWidth - tiles.dividerWidth
               outerRight: true
               label: "Notification"
               checked: root.setting("notifyEnabled", true) === true
