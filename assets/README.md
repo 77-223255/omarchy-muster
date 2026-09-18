@@ -8,7 +8,7 @@ needs to change.
 |------|---------------|---------------|
 | `panel.png` | `README.md`, `README.zh.md` | The panel open, with a blocked card, one or two working cards and an idle one |
 | `chip.png` | `README.md`, `README.zh.md` | A tight crop of the bar chip, several agent marks visible |
-| `notification.png` | optional, not currently embedded | The completion notification next to the chip |
+| `notification.png` | `README.md`, `README.zh.md` | The alerts a finished run raises — one per agent, each with that agent's own mark |
 
 One more file lives outside this directory:
 

@@ -35,6 +35,8 @@ desktop notification — without running a terminal multiplexer.
 
 ![The bar chip](assets/chip.png)
 
+![The completion notification](assets/notification.png)
+
 Captures live in [`assets/`](assets/README.md); the marketplace listing card is
 one optional root `preview.png`.
 

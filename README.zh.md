@@ -27,6 +27,8 @@
 
 ![状态栏图标](assets/chip.png)
 
+![完成提醒](assets/notification.png)
+
 截图放在 [`assets/`](assets/README.md);市场列表卡片是仓库根目录下可选的一个
 `preview.png`。
 
