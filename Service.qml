@@ -213,10 +213,12 @@ Item {
   }
 
   function notificationCommand(session, isTest) {
-    var subject = (isTest === true ? "test  ·  " : "") + session.title + " · " + session.agentLabel
+    var subject = (isTest === true ? "test  ·  " : "") + session.title
     var args = ["omarchy-notification-send", "-u", "normal"]
-    // A one-character label (pi's "π") doubles as the popup's mark.
-    if (session.agentLabel.length === 1) args = args.concat(["-g", session.agentLabel])
+    // The mark is the agent's identity everywhere else, so the popup carries
+    // the glyph instead of an agent name.
+    if (session.agentIcon && session.agentIcon !== "")
+      args = args.concat(["-g", session.agentIcon])
     args = args.concat([
       subject,
       session.lastPrompt !== "" ? Model.truncate(session.lastPrompt, 180)
@@ -243,7 +245,7 @@ Item {
     var subject = session && session.title ? session
       : (root.sessions.length > 0 ? root.sessions[0] : {
         title: "Muster",
-        agentLabel: "pi",
+        agentIcon: String.fromCodePoint(0xe901),
         lastPrompt: "Test alert",
         cwd: "",
         windowAddress: ""
