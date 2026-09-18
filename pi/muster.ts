@@ -316,11 +316,7 @@ export default function (pi) {
 		if (!enabled(ctx)) return;
 		uiPrompts = Math.max(0, uiPrompts - 1);
 		if (uiPrompts > 0) return;
-		try {
-			setState(ctx?.isIdle?.() === true ? "idle" : "working");
-		} catch {
-			setState("working");
-		}
+		setState(ctx?.isIdle?.() === true ? "idle" : "working");
 	});
 
 	// agent_settled is the only "pi will not continue on its own" signal:

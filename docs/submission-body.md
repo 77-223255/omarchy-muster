@@ -18,8 +18,8 @@ _No response_
 
 No build step, no package manager, and no network access at runtime: the plugin
 is four QML files plus one JavaScript helper, and it shells out only to
-`hyprctl`, `find`, `mkdir` and (for alerts) `paplay` plus
-`omarchy-notification-send`.
+`hyprctl`, `find`, `mkdir`, and — when it is installed — `inotifywait`, plus
+`paplay` and `omarchy-notification-send` for alerts.
 
 State comes from records — one small JSON file per session under
 `~/.local/state/omarchy/muster/sessions/` — so the plugin never scrapes window

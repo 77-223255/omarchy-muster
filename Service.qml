@@ -26,23 +26,20 @@ Item {
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string stateDir: Model.stateDir(Quickshell.env("XDG_STATE_HOME") || "", root.home)
 
-  // The completion toast is the one surface that renders a mark through
-  // omarchy's notification font (the bar font). That font is a Nerd Font, and
-  // omarchy's brand glyphs (U+E900..E90D) collide with Nerd Font codepoints —
-  // U+E901 is a Nerd Font "cP", not pi — so a brand mark sent as -g renders as
-  // the wrong icon. Render those marks as tiny SVGs in the notification text
-  // colour instead, and hand the toast an image. Nerd Font marks (claude,
-  // gemini, …) still ride the glyph hint and keep the theme's text colour.
+  // The completion toast is the one surface that cannot set its own font: it
+  // draws -g in omarchy's notification font (the bar's Nerd Font). omarchy's
+  // brand glyphs (U+E900..E90D) collide with Nerd Font codepoints there —
+  // U+E901 is a Nerd Font "cP", not pi — so a mark sent as a glyph renders as
+  // the wrong icon. Render every mark as a tiny SVG instead and hand the toast
+  // an image, which also lets the fill follow the theme.
   readonly property string marksDir: {
     var d = String(root.stateDir)
     var cut = d.lastIndexOf("/")
     return (cut > 0 ? d.slice(0, cut) : d) + "/marks"
   }
-  // Notification API note: org.freedesktop.Notifications has no colour field,
-  // so a colour cannot ride the toast itself. These marks are our own SVGs,
-  // though, so the fill is ours to choose — brand and Nerd Font marks alike.
-  // They mirror the bar/panel palette: blocked urgent, working accent, idle
-  // the notification text colour.
+  // The marks are ours, so the fill is ours too: they mirror the bar/panel
+  // palette — blocked urgent, working accent, idle the notification text
+  // colour. (org.freedesktop.Notifications itself has no colour field.)
   readonly property color notificationText: Color.notifications.text
   readonly property color notificationAccent: Color.accent
   readonly property color notificationUrgent: Color.urgent
@@ -92,7 +89,6 @@ Item {
   // Normalized, sorted sessions. Reassigned wholesale on every change so QML
   // bindings re-evaluate.
   property var sessions: []
-  property int revision: 0
 
   // ------------------------------------------------------------- settings
 
@@ -264,7 +260,6 @@ Item {
     if (signature === root._signature) return
     root._signature = signature
     root.sessions = collected
-    root.revision++
   }
 
   property string _signature: ""
@@ -353,18 +348,16 @@ Item {
     return args
   }
 
-  // Wired to the panel's "Test" button and shell IPC so the wiring can be
-  // checked without waiting for a real run to finish.
-  // Fired by a click on a panel card, and by shell IPC, so the alert path can
-  // be checked without waiting for a real run to finish. The notification is
-  // marked as a test so it cannot be mistaken for a completion.
+  // Right-clicking a panel card, the chip's middle click, and the `test` IPC
+  // all land here, so the alert path can be checked without waiting for a real
+  // run to finish. The notification is marked as a test so it cannot be
+  // mistaken for a completion.
   function testAlert(session) {
     var subject = session && session.title ? session
       : (root.sessions.length > 0 ? root.sessions[0] : {
         title: "Muster",
         agent: "pi",
         agentIcon: String.fromCodePoint(0xe901),
-        agentFont: "omarchy",
         lastPrompt: "Test alert",
         cwd: "",
         windowAddress: ""

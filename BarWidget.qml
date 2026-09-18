@@ -51,12 +51,8 @@ BarWidget {
   // the state on its rim and title: blocked is the urgent colour, a running
   // agent the theme accent, an idle one plain bar text. A record that never
   // reported a state we recognise fades back instead of pretending to be idle.
-  //
-  // This replaced a single chip-wide colour, which painted every mark red as
-  // soon as one session was blocked -- true about the chip, wrong about the
-  // sessions, and unreadable past two marks. The chip as a whole still tracks
-  // the aggregate (the button's active tint below), so "something needs you"
-  // stays visible at a glance.
+  // The chip as a whole still tracks the aggregate (the button's active tint
+  // below), so "something needs you" stays visible at a glance.
   function markColor(state) {
     if (state === "blocked") return bar ? bar.urgent : Color.urgent
     if (state === "working") return Color.accent
@@ -83,7 +79,7 @@ BarWidget {
     var lines = []
     for (var i = 0; i < sessions.length && i < 8; i++) {
       var session = sessions[i]
-      var where = session.project !== "" ? session.project : session.cwd
+      var where = Model.folderLabel(session)
       lines.push(session.agentLabel + " · " + session.title + " · " + Model.stateLabel(session.state)
         + (where !== "" ? " · " + where : ""))
     }

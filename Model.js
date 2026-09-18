@@ -48,10 +48,10 @@ var IDLE_GLYPH = "󰂚"
 
 var STATES = ["working", "blocked", "idle", "unknown"]
 
-// Returns the canonical id alongside the label, so a record written as
-// "claude-code" groups with "claude" instead of becoming a second agent. The
-// label is the whole identity: pi's is the symbol "π", everyone else's is their
-// name, and there are no invented logos.
+// Returns the canonical id alongside the label and mark, so a record written
+// as "claude-code" groups with "claude" instead of becoming a second agent.
+// `font` says which family draws the mark: omarchy's own for the brand
+// codepoints, the bar's Nerd Font for the rest.
 function agentMeta(agent) {
   var key = String(agent || "").toLowerCase()
   if (ALIASES[key]) key = ALIASES[key]
@@ -102,7 +102,6 @@ function normalizeRecord(raw, path) {
     agentLabel: meta.label,
     agentIcon: meta.icon,
     agentFont: meta.font,
-    sessionId: String(raw.sessionId || ""),
     name: name,
     title: name !== "" ? name : (project !== "" ? project : meta.label),
     cwd: cwd,
@@ -151,7 +150,7 @@ function isStale(session, now, staleAfterSec) {
 }
 
 function summarize(sessions) {
-  var out = { total: sessions.length, working: 0, blocked: 0, idle: 0, unknown: 0 }
+  var out = { working: 0, blocked: 0, idle: 0, unknown: 0 }
   for (var i = 0; i < sessions.length; i++) {
     var state = sessions[i].state
     if (out[state] === undefined) out.unknown += 1

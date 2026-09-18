@@ -65,7 +65,8 @@ ln -sfn ~/.config/omarchy/plugins/shienze.muster/pi/muster.ts \
 ```
 
 Restart pi for the bridge to load. Changing a `.qml` file hot-reloads the
-widget, except the IPC target: after edits, `omarchy restart shell`.
+widget, but `Model.js` (a cached QML library) and the IPC target only change
+on `omarchy restart shell`.
 
 ### Working from a checkout
 

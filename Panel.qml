@@ -98,16 +98,10 @@ Panel {
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
-  // ------------------------------------------------------------- hero
-
-  // No mark here: the cards carry the colour, so the header stays plain.
-
   // ------------------------------------------------------------- card
 
-  // A running session is a solid block of the theme colour, a blocked one the
-  // urgent colour, everything else plain. The text inverts to the popup's own
-  // background (the language the settings tiles use), and the only thing that
-  // moves is a soft rim around a running card.
+  // One session. The interior is always the same grey; the state is carried by
+  // the rim and the title, so a mixed list still reads.
   component SessionCard: BorderSurface {
     id: card
     required property var session
@@ -232,8 +226,8 @@ Panel {
     }
   }
 
-  // Two states, two tiles, no gap between them: the outer corners follow the
-  // theme's rounding, the inner ones stay square so the pair reads as one
+  // Two states, two tiles split by a hairline seam: the outer corners follow
+  // the theme's rounding, the inner ones stay square so the pair reads as one
   // control. On = the theme accent, off = a grey tile.
 
   component SettingTile: Rectangle {

@@ -54,8 +54,8 @@ ln -sfn ~/.config/omarchy/plugins/shienze.muster/pi/muster.ts \
 ~/.config/omarchy/plugins/shienze.muster/bin/muster-doctor
 ```
 
-桥接要**重启 pi** 才会加载。改 `.qml` 是热重载的,只有 IPC 目标例外:改完要
-`omarchy restart shell`。
+桥接要**重启 pi** 才会加载。改 `.qml` 是热重载的,但 `Model.js` 是 QML 缓存的库,
+和 IPC 目标一样要 `omarchy restart shell` 才会更新。
 
 ### 从源码目录开发
 
