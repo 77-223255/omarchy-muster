@@ -24,8 +24,9 @@ desktop notification — without running a terminal multiplexer.
   nothing. No elapsed timers: the panel answers "is anything running and does it
   need me".
 - **Alerts** — when a run finishes, a sound and an Omarchy notification.
-  Clicking the notification focuses that session's terminal. **Clicking a card**
-  fires the same alert on demand for that session, with `test` in the
+  Clicking the notification focuses that session's terminal. In the panel,
+  **left-clicking a card** focuses that session's terminal too, and
+  **right-clicking** one fires the same alert on demand, with `test` in the
   notification title so it cannot be mistaken for a real completion.
 
 ## Screenshots
@@ -116,8 +117,8 @@ you doing it from the panel.
 | Where | Action |
 |-------|--------|
 | Bar chip | left click = panel, middle click = test alert |
-| Panel card | click = fire a test alert for that session |
-| Panel keys | `j`/`k` move, Enter fires the selected card's alert, `t` the first session's, Esc closes |
+| Panel card | left click = focus that session's terminal, right click = test alert |
+| Panel keys | `j`/`k` move, Enter focuses the selected card, `t` tests it, Esc closes |
 | IPC | `omarchy-shell shienze.muster <open\|close\|toggle\|test\|status>` |
 
 ```bash

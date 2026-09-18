@@ -72,10 +72,15 @@ Panel {
     if (service && typeof service.refresh === "function") service.refresh()
   }
 
-  // A click on a card fires the alert path for that session, marked as a test
-  // in the notification. Focusing the terminal lives on the notification's own
-  // click action now, so it is one click away rather than being the click.
+  // Left click focuses a session's terminal; right click fires the alert path
+  // for it, marked as a test in the notification. The notification's own click
+  // focuses too, so the two surfaces behave the same.
   function activate(session) {
+    if (!session) return
+    if (service && typeof service.focusSession === "function") service.focusSession(session)
+  }
+
+  function testSession(session) {
     if (!session) return
     if (service && typeof service.testAlert === "function") service.testAlert(session)
   }
@@ -151,7 +156,11 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onClicked: root.activate(card.session)
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      onClicked: function(m) {
+        if (m.button === Qt.RightButton) root.testSession(card.session)
+        else root.activate(card.session)
+      }
       onContainsMouseChanged: if (containsMouse) root.cursor = card.cardIndex
     }
 
@@ -295,7 +304,8 @@ Panel {
       }
       onTextKey: function(t) {
         if (t === "t" || t === "T") {
-          if (root.service && root.service.testAlert) root.service.testAlert()
+          if (root.sessions.length > 0) root.testSession(root.sessions[root.cursor])
+          else if (root.service && root.service.testAlert) root.service.testAlert()
         }
       }
 

@@ -314,6 +314,25 @@ Item {
       Quickshell.execDetached([root.soundPlayer, root.soundFile])
   }
 
+  // The argv that focuses the terminal a window address belongs to. Hyprland
+  // >= 0.56 with a Lua config reads `dispatch` as Lua and rejects the classic
+  // `focuswindow address:…`, so try the Lua form first and fall back — the same
+  // pair omarchy-launch-or-focus uses. The address goes into Lua source, so only
+  // a plain hex address is accepted.
+  function focusCommand(address) {
+    return ["bash", "-c",
+      'hyprctl dispatch "hl.dsp.focus({ window = \\"address:$1\\" })" || hyprctl dispatch focuswindow "address:$1"',
+      "muster-focus", address]
+  }
+
+  // Left-clicking a panel card jumps to the session's terminal; a notification
+  // click runs the same command.
+  function focusSession(session) {
+    var address = String((session && session.windowAddress) || "")
+    if (!/^0x[0-9a-fA-F]+$/.test(address)) return
+    Quickshell.execDetached(root.focusCommand(address))
+  }
+
   function notificationCommand(session, isTest) {
     var subject = (isTest === true ? "test  ·  " : "alert  ·  ") + session.title
     var args = ["omarchy-notification-send", "-u", "normal"]
@@ -329,14 +348,8 @@ Item {
         : (session.cwd !== "" ? session.cwd : "finished")
     ])
     // Clicking the notification jumps to the terminal that produced it.
-    // Hyprland >= 0.56 with a Lua config reads `dispatch` as Lua and rejects
-    // the classic `focuswindow address:…`, so try the Lua form first and fall
-    // back — the same pair omarchy-launch-or-focus uses. The address goes into
-    // Lua source, so only a plain hex address is accepted.
     if (/^0x[0-9a-fA-F]+$/.test(session.windowAddress))
-      args = args.concat(["--exec", "bash", "-c",
-        'hyprctl dispatch "hl.dsp.focus({ window = \\"address:$1\\" })" || hyprctl dispatch focuswindow "address:$1"',
-        "muster-focus", session.windowAddress])
+      args = args.concat(["--exec"]).concat(root.focusCommand(session.windowAddress))
     return args
   }
 
