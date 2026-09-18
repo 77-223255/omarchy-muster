@@ -59,12 +59,15 @@ ln -sfn ~/.config/omarchy/plugins/shienze.muster/pi/muster.ts \
 
 ### 从源码目录开发
 
-`omarchy plugin add` 会把仓库克隆到 `~/.config/omarchy/plugins/<id>/`。如果你想
-直接改自己的 checkout,就让那个路径指向仓库 —— shell 会跟随软链,插件 id 仍然
-来自 `manifest.json`:
+`omarchy plugin add` 已经会在 `~/.config/omarchy/plugins/shienze.muster/` 留下一个
+完整的 Git checkout(带 `origin` remote),直接在那里改就行:保存 `.qml` 就热重载,
+也能像别的 clone 一样开分支、提交、推送。`omarchy plugin update shienze.muster`
+会把上游的新提交拉进这个目录。
+
+如果你想改自己另外放的 checkout,就用软链把插件路径指过去 —— shell 会跟随软链,
+插件 id 仍然来自 `manifest.json`:
 
 ```bash
-git clone https://github.com/77-223255/omarchy-muster.git ~/Projects/omarchy-muster
 ln -sfn ~/Projects/omarchy-muster ~/.config/omarchy/plugins/shienze.muster
 omarchy-shell shell rescanPlugins
 omarchy plugin enable shienze.muster left

@@ -68,12 +68,17 @@ widget, except the IPC target: after edits, `omarchy restart shell`.
 
 ### Working from a checkout
 
-`omarchy plugin add` clones into `~/.config/omarchy/plugins/<id>/`. To keep
-editing a checkout instead, point that path at the repo — the shell follows the
-symlink, and the plugin id still comes from `manifest.json`:
+`omarchy plugin add` already leaves a Git checkout at
+`~/.config/omarchy/plugins/shienze.muster/`, complete with its `origin` remote,
+so edit the files there: the widget hot-reloads on every `.qml` save, and you can
+branch, commit, and push from that directory like any other clone.
+`omarchy plugin update shienze.muster` brings new upstream commits into it.
+
+If you would rather work in a checkout you keep elsewhere, point the plugin path
+at it with a symlink — the shell follows the symlink, and the plugin id still
+comes from `manifest.json`:
 
 ```bash
-git clone https://github.com/77-223255/omarchy-muster.git ~/Projects/omarchy-muster
 ln -sfn ~/Projects/omarchy-muster ~/.config/omarchy/plugins/shienze.muster
 omarchy-shell shell rescanPlugins
 omarchy plugin enable shienze.muster left
