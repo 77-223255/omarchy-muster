@@ -135,7 +135,7 @@ if command -v node >/dev/null; then
 const fs = require("fs");
 const Model = fs.readFileSync(process.argv[2], "utf8").replace(/^\.pragma library\s*$/m, "");
 const marks = process.argv[3];
-const lib = new Function(Model + "\nreturn { truncate, agentMeta, normalizeRecord }; ")();
+const lib = new Function(Model + "\nreturn { truncate, agentMeta, normalizeRecord, isStale }; ")();
 let fail = 0;
 const bad = (m) => { console.log("  \x1b[31m✗\x1b[0m " + m); fail++; };
 const good = (m) => console.log("  \x1b[32m✓\x1b[0m " + m);
@@ -153,6 +153,12 @@ if (a && a.agent === "claude" && a.title === "y") good("claude-code folds to cla
 else bad("alias/project normalisation wrong: " + JSON.stringify(a));
 const u = lib.normalizeRecord({ agent: "mystery", state: "bogus" }, "/p");
 if (u && u.state === "unknown") good("unknown state normalised"); else bad("unknown state not normalised");
+
+// staleness: old yes, fresh no, and a future stamp must not pin itself forever
+const now = Date.now();
+if (lib.isStale({ updatedAt: now - 1000 }, now, 120)) bad("fresh record flagged stale"); else good("fresh record kept");
+if (!lib.isStale({ updatedAt: now - 200 * 1000 }, now, 120)) bad("old record not flagged stale"); else good("old record dropped");
+if (!lib.isStale({ updatedAt: now + 10 * 60 * 1000 }, now, 120)) bad("future-stamped record pinned forever"); else good("future-stamped record dropped");
 
 // one file per state per agent
 const ids = ["pi","opencode","omp","grok","codex","hermes","openclaw","cursor-agent","claude","copilot","crush","gemini","muse"];

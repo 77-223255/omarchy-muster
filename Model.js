@@ -144,6 +144,9 @@ function sortSessions(list) {
 function isStale(session, now, staleAfterSec) {
   if (!staleAfterSec || staleAfterSec <= 0) return false
   if (!session.updatedAt) return false
+  // A timestamp in the future (a clock change, a buggy writer) would pin the
+  // record forever, because now - updatedAt only ever goes negative.
+  if (session.updatedAt > now + staleAfterSec * 1000) return true
   return (now - session.updatedAt) > staleAfterSec * 1000
 }
 
