@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import qs.Commons
 import "Model.js" as Model
 
 // The single source of truth for agent sessions.
@@ -24,6 +25,50 @@ Item {
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string stateDir: Model.stateDir(Quickshell.env("XDG_STATE_HOME") || "", root.home)
+
+  // The completion toast is the one surface that renders a mark through
+  // omarchy's notification font (the bar font). That font is a Nerd Font, and
+  // omarchy's brand glyphs (U+E900..E90D) collide with Nerd Font codepoints —
+  // U+E901 is a Nerd Font "cP", not pi — so a brand mark sent as -g renders as
+  // the wrong icon. Render those marks as tiny SVGs in the notification text
+  // colour instead, and hand the toast an image. Nerd Font marks (claude,
+  // gemini, …) still ride the glyph hint and keep the theme's text colour.
+  readonly property string marksDir: {
+    var d = String(root.stateDir)
+    var cut = d.lastIndexOf("/")
+    return (cut > 0 ? d.slice(0, cut) : d) + "/marks"
+  }
+  readonly property color notificationText: Color.notifications.text
+  onNotificationTextChanged: root.writeMarks()
+
+  function hexColor(c) {
+    function pair(v) {
+      var n = Math.round(Math.max(0, Math.min(1, Number(v))) * 255).toString(16)
+      return n.length < 2 ? "0" + n : n
+    }
+    return "#" + pair(c.r) + pair(c.g) + pair(c.b)
+  }
+
+  // One line per brand agent: id then the omarchy font codepoint. Kept in
+  // sync with Model.js's AGENTS table (every mark with font: "omarchy").
+  readonly property string markScript: [
+    "dir=\"$1\"",
+    "color=\"$2\"",
+    "mkdir -p \"$dir\"",
+    "mark() { printf \"%s\" \"<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'><text x='32' y='62' font-family='omarchy' font-size='60' text-anchor='middle' fill='$color'>&#x$2;</text></svg>\" > \"$dir/$1.svg\"; }",
+    "mark pi E901",
+    "mark opencode E902",
+    "mark omp E903",
+    "mark grok E904",
+    "mark codex E905",
+    "mark hermes E90A",
+    "mark openclaw E90C",
+    "mark cursor-agent E90D"
+  ].join("\n")
+
+  function writeMarks() {
+    if (!markWriter.running) markWriter.running = true
+  }
 
   // Normalized, sorted sessions. Reassigned wholesale on every change so QML
   // bindings re-evaluate.
@@ -62,12 +107,19 @@ Item {
   Component.onCompleted: {
     mkdirProcess.running = true
     refresh()
+    root.writeMarks()
   }
 
   Process {
     id: mkdirProcess
     running: false
     command: ["mkdir", "-p", root.stateDir]
+  }
+
+  Process {
+    id: markWriter
+    running: false
+    command: ["bash", "-c", root.markScript, "muster-marks", root.marksDir, root.hexColor(root.notificationText)]
   }
 
   Timer {
@@ -215,10 +267,13 @@ Item {
   function notificationCommand(session, isTest) {
     var subject = (isTest === true ? "test  ·  " : "") + session.title
     var args = ["omarchy-notification-send", "-u", "normal"]
-    // The mark is the agent's identity everywhere else, so the popup carries
-    // the glyph instead of an agent name.
-    if (session.agentIcon && session.agentIcon !== "")
-      args = args.concat(["-g", session.agentIcon])
+    var mark = String(session.agentIcon || "")
+    if (mark !== "") {
+      if (session.agentFont === "omarchy")
+        args = args.concat(["-i", root.marksDir + "/" + session.agent + ".svg"])
+      else
+        args = args.concat(["-g", mark])
+    }
     args = args.concat([
       subject,
       session.lastPrompt !== "" ? Model.truncate(session.lastPrompt, 180)
@@ -245,7 +300,9 @@ Item {
     var subject = session && session.title ? session
       : (root.sessions.length > 0 ? root.sessions[0] : {
         title: "Muster",
+        agent: "pi",
         agentIcon: String.fromCodePoint(0xe901),
+        agentFont: "omarchy",
         lastPrompt: "Test alert",
         cwd: "",
         windowAddress: ""
