@@ -127,7 +127,7 @@ omarchy-shell shienze.muster status | jq '.details[]'
 
 | 常量 | 值 | 含义 |
 |----------|-------|---------|
-| `refreshIntervalSec` | `2` | 扫描新增/删除记录的间隔(已存在的记录是文件监听,所以提醒是即时的) |
+| `refreshIntervalSec` | `2` | 备用扫描间隔;装了 `inotifywait` 后新记录会立刻出现 |
 | `staleAfterSec` | `120` | 多久没心跳就忘掉一条记录(桥接每 30s 心跳一次) |
 | `debounceMs` | `2000` | 多个会话同时结束只提醒一次 |
 | `soundFile` | freedesktop `complete.oga` | |
@@ -234,7 +234,7 @@ $report --agent claude --session "$SESSION_ID" --remove
 
 | 部分 | 语言 | 依赖 |
 |-------|----------|-----------|
-| `Service.qml`、`BarWidget.qml`、`Panel.qml`、`Record.qml` | QML | omarchy shell(Quickshell、Qt 6)、`hyprctl`、`find`、`mkdir` |
+| `Service.qml`、`BarWidget.qml`、`Panel.qml`、`Record.qml` | QML | omarchy shell(Quickshell、Qt 6)、`hyprctl`、`find`、`mkdir`、`inotifywait`(可选) |
 | `Model.js` | JavaScript(QML 引擎) | 无 |
 | `pi/muster.ts` | TypeScript | pi 自带的 Bun 运行时;只用 node 内置模块,零 npm 依赖 |
 | `bin/muster-report` | Bash | `jq`、`flock`、`hyprctl` |
@@ -269,6 +269,7 @@ $report --agent claude --session "$SESSION_ID" --remove
 | `pi/muster.ts` | pi → 记录 桥接 |
 | `bin/muster-report` | 给其它 agent 的记录写入器 |
 | `bin/muster-doctor` | 依赖体检 |
+| `tests/scenarios.sh` | 端到端场景测试(数据断言 + 截图) |
 | `assets/` | README 截图 |
 | `preview.png` | 市场列表卡片(可选,放根目录) |
 | `docs/submission-body.md` | 提交 issue 的正文 |

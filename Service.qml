@@ -108,7 +108,7 @@ Item {
   readonly property bool soundEnabled: setting("soundEnabled", true) === true
   readonly property bool notifyEnabled: setting("notifyEnabled", true) === true
 
-  readonly property int refreshIntervalSec: 2    // rescan cadence for new/removed records
+  readonly property int refreshIntervalSec: 2    // fallback rescan cadence; inotifywait makes new records instant
   readonly property int staleAfterSec: 120       // forget a record whose writer stopped (heartbeat is 30s)
   readonly property int debounceMs: 2000         // collapse several sessions finishing together
   readonly property string soundFile: "/usr/share/sounds/freedesktop/stereo/complete.oga"
@@ -133,6 +133,8 @@ Item {
     id: mkdirProcess
     running: false
     command: ["mkdir", "-p", root.stateDir]
+    // Only watch the directory once it exists.
+    onExited: inotifyProbe.running = true
   }
 
   Process {
@@ -141,6 +143,33 @@ Item {
     command: ["bash", "-c", root.markScript, "muster-marks", root.marksDir,
       root.hexColor(root.notificationText), root.hexColor(root.notificationAccent),
       root.hexColor(root.notificationUrgent)]
+  }
+
+  // The scan tick finds new records, but that can be up to refreshIntervalSec
+  // after the agent wrote one. A directory watch closes that gap: opening pi
+  // on an existing conversation shows its card at once. inotifywait is
+  // optional — without it the scan below is still the fallback.
+  Process {
+    id: inotifyProbe
+    running: false
+    command: ["bash", "-c", "command -v inotifywait >/dev/null 2>&1"]
+    onExited: function(exitCode) { if (exitCode === 0) watchProcess.running = true }
+  }
+
+  Process {
+    id: watchProcess
+    running: false
+    command: ["inotifywait", "-m", "-q", "-e", "create", "-e", "delete",
+      "-e", "moved_to", "-e", "moved_from", root.stateDir]
+    stdout: SplitParser { onRead: root.refresh() }
+    // If the watch dies (directory replaced, inotifywait killed), keep trying.
+    onExited: watchRetry.restart()
+  }
+
+  Timer {
+    id: watchRetry
+    interval: 5000
+    onTriggered: if (!watchProcess.running) watchProcess.running = true
   }
 
   Timer {

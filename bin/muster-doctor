@@ -81,6 +81,7 @@ fi
 have hyprctl "focusing an agent's terminal on click"
 have find "enumerating session records"
 have mkdir "creating the sessions directory"
+have inotifywait "showing a new session at once instead of on the next scan" optional
 
 if [[ -d $state_dir ]]; then
   record ok "sessions dir" "$state_dir ($(find "$state_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l) record(s))"

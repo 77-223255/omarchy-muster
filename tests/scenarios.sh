@@ -166,6 +166,26 @@ JS
   check $? "Model.js unit checks"
 fi
 
+if command -v node >/dev/null; then
+  cp "$PLUGIN/pi/muster.ts" "$SHOT_DIR/bridge.mjs"
+  printf '\nexport { lastUserPrompt };\n' >> "$SHOT_DIR/bridge.mjs"
+  cat > "$SHOT_DIR/bridge-test.mjs" <<JS
+import { lastUserPrompt } from "$SHOT_DIR/bridge.mjs";
+const mk = (branch) => ({ sessionManager: { getBranch: () => branch } });
+const branch = [
+  { type: "message", message: { role: "user", content: "first" } },
+  { type: "message", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } },
+  { type: "message", message: { role: "user", content: [{ type: "text", text: "the last one" }] } },
+];
+const got = lastUserPrompt(mk(branch));
+if (got !== "the last one") { console.log("  \x1b[31m✗\x1b[0m resume prompt = " + JSON.stringify(got)); process.exit(1); }
+if (lastUserPrompt(mk([])) !== "") { console.log("  \x1b[31m✗\x1b[0m empty branch should be empty"); process.exit(1); }
+console.log("  \x1b[32m✓\x1b[0m bridge restores the last user prompt on resume");
+JS
+  node "$SHOT_DIR/bridge-test.mjs"
+  check $? "bridge resume prompt check"
+fi
+
 # ---------------------------------------------------------------- visual
 
 if [ "$VISUAL" = 1 ]; then

@@ -141,7 +141,7 @@ live at the top of `Service.qml`:
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| `refreshIntervalSec` | `2` | Rescan cadence for new/removed records (existing records are watched, so alerts are immediate) |
+| `refreshIntervalSec` | `2` | Fallback rescan cadence; `inotifywait` makes new records appear at once |
 | `staleAfterSec` | `120` | Forget a record whose writer stopped (the bridge heartbeats every 30s) |
 | `debounceMs` | `2000` | Collapse several sessions finishing together into one alert |
 | `soundFile` | freedesktop `complete.oga` | |
@@ -257,7 +257,7 @@ extension must be TypeScript.
 
 | Piece | Language | Depends on |
 |-------|----------|-----------|
-| `Service.qml`, `BarWidget.qml`, `Panel.qml`, `Record.qml` | QML | omarchy shell (Quickshell, Qt 6), `hyprctl`, `find`, `mkdir` |
+| `Service.qml`, `BarWidget.qml`, `Panel.qml`, `Record.qml` | QML | omarchy shell (Quickshell, Qt 6), `hyprctl`, `find`, `mkdir`, `inotifywait` (optional) |
 | `Model.js` | JavaScript (QML engine) | nothing |
 | `pi/muster.ts` | TypeScript | pi's bundled Bun runtime; node builtins only, zero npm packages |
 | `bin/muster-report` | Bash | `jq`, `flock`, `hyprctl` |
@@ -296,6 +296,7 @@ its own small plugin, not here.
 | `pi/muster.ts` | pi → record bridge |
 | `bin/muster-report` | record writer for other agents |
 | `bin/muster-doctor` | dependency check |
+| `tests/scenarios.sh` | end-to-end scenario test (data assertions + screenshots) |
 | `assets/` | README screenshots |
 | `preview.png` | root listing card for the marketplace (optional) |
 | `docs/submission-body.md` | the exact issue body for a marketplace listing |
