@@ -129,6 +129,36 @@ function resolveWindow() {
 
 // ------------------------------------------------------------------ writer
 
+// The last thing the user typed, read back from a resumed session so the card
+// is not blank until the next prompt. `getBranch()` returns SessionEntry[];
+// user messages carry `message.content` as a string or text blocks.
+function messageText(message) {
+	const content = message?.content;
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content
+			.filter((part) => part?.type === "text" && typeof part.text === "string")
+			.map((part) => part.text)
+			.join(" ");
+	}
+	return "";
+}
+
+function lastUserPrompt(ctx) {
+	try {
+		const branch = ctx?.sessionManager?.getBranch?.() || [];
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry?.type !== "message" || entry.message?.role !== "user") continue;
+			const text = messageText(entry.message).trim();
+			if (text) return text;
+		}
+	} catch {
+		// No session manager, or no history yet.
+	}
+	return "";
+}
+
 let recordFile = "";
 let record = null;
 let heartbeat = null;
@@ -188,7 +218,7 @@ function startSession(pi, ctx) {
 		windowAddress: resolveWindow(),
 		updatedAt: Date.now(),
 		completedRuns: 0,
-		lastPrompt: "",
+		lastPrompt: truncate(lastUserPrompt(ctx), 240),
 		seq: 1,
 	};
 	writeRecord();
