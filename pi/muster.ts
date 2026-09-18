@@ -45,7 +45,14 @@ function sanitize(value) {
 function truncate(text, limit) {
 	const value = String(text || "").replace(/\s+/g, " ").trim();
 	if (value.length <= limit) return value;
-	return value.slice(0, limit - 1).trimEnd() + "…";
+	let cut = value.slice(0, limit - 1).trimEnd();
+	// Never keep half of a surrogate pair; a lone surrogate reaches Qt as a
+	// replacement box when the record is parsed.
+	if (cut.length > 0) {
+		const last = cut.charCodeAt(cut.length - 1);
+		if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+	}
+	return cut + "…";
 }
 
 // --------------------------------------------------------------- window id

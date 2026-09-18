@@ -180,7 +180,14 @@ function truncate(text, limit) {
   // trailing space with a regex instead. Short text returns above and never
   // reached this line, which is why only long prompts broke the panel card
   // and the notification body.
-  return value.slice(0, Math.max(0, limit - 1)).replace(/\s+$/, "") + "…"
+  var cut = value.slice(0, Math.max(0, limit - 1)).replace(/\s+$/, "")
+  // Never keep half of a surrogate pair: a lone surrogate renders as a
+  // replacement box in Qt.
+  if (cut.length > 0) {
+    var last = cut.charCodeAt(cut.length - 1)
+    if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1)
+  }
+  return cut + "…"
 }
 
 function stateDir(xdgStateHome, home) {
