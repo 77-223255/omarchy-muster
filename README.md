@@ -296,7 +296,6 @@ its own small plugin, not here.
 | `pi/muster.ts` | pi → record bridge |
 | `bin/muster-report` | record writer for other agents |
 | `bin/muster-doctor` | dependency check |
-| `tests/scenarios.sh` | end-to-end scenario test (data assertions + screenshots) |
 | `assets/` | README screenshots |
 | `preview.png` | root listing card for the marketplace (optional) |
 | `docs/submission-body.md` | the exact issue body for a marketplace listing |

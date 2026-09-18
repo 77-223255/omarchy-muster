@@ -2,3 +2,6 @@
 *.bak
 *.tmp
 *.log
+
+# dev-only scenario test; not shipped in the plugin
+/tests/

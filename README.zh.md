@@ -269,7 +269,6 @@ $report --agent claude --session "$SESSION_ID" --remove
 | `pi/muster.ts` | pi → 记录 桥接 |
 | `bin/muster-report` | 给其它 agent 的记录写入器 |
 | `bin/muster-doctor` | 依赖体检 |
-| `tests/scenarios.sh` | 端到端场景测试(数据断言 + 截图) |
 | `assets/` | README 截图 |
 | `preview.png` | 市场列表卡片(可选,放根目录) |
 | `docs/submission-body.md` | 提交 issue 的正文 |
