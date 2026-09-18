@@ -106,7 +106,7 @@ fi
 # terminal emulator.
 
 resolve_window() {
-  local current="$1" stat chain=() address="" i
+  local current="$1" stat chain=() i
   for ((i = 0; i < 16; i++)); do
     ((current > 1)) || break
     chain+=("$current")
@@ -117,14 +117,33 @@ resolve_window() {
   (( ${#chain[@]} > 0 )) || return 0
   local clients
   clients=$(hyprctl -j clients 2>/dev/null) || return 0
-  for current in "${chain[@]}"; do
-    address=$(jq -r --argjson pid "$current" \
-      '.[] | select(.pid == $pid) | .address' <<<"$clients" 2>/dev/null | head -n1)
-    if [[ -n $address && $address != null ]]; then
-      printf '%s' "$address"
-      return 0
-    fi
+
+  local pid matches="" count=0
+  for pid in "${chain[@]}"; do
+    matches=$(jq -c --argjson pid "$pid" '[.[] | select(.pid == $pid)]' <<<"$clients" 2>/dev/null)
+    count=$(jq 'length' <<<"${matches:-[]}" 2>/dev/null)
+    [[ $count =~ ^[0-9]+$ ]] || count=0
+    ((count > 0)) && break
+    matches=""
   done
+  ((count > 0)) || return 0
+
+  if ((count == 1)); then
+    jq -r '.[0].address' <<<"$matches"
+    return 0
+  fi
+
+  # A single-instance terminal (ghostty, kitty) reports one pid for every
+  # window, so the parent chain cannot tell them apart. Prefer the focused
+  # window, then the most recently focused one.
+  local focused address
+  focused=$(hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null)
+  address=$(jq -r --arg f "$focused" '.[] | select(.address == $f) | .address' <<<"$matches" 2>/dev/null | head -n1)
+  if [[ -n $address && $address != null ]]; then
+    printf '%s' "$address"
+    return 0
+  fi
+  jq -r 'sort_by(.focusHistoryID // 999999) | .[0].address' <<<"$matches"
 }
 
 window_address=""

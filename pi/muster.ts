@@ -72,6 +72,20 @@ function parentChain(pid) {
 	return chain;
 }
 
+function activeWindowAddress() {
+	try {
+		const raw = execFileSync("hyprctl", ["-j", "activewindow"], {
+			timeout: 1500,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		const win = JSON.parse(raw);
+		return String(win?.address || "");
+	} catch {
+		return "";
+	}
+}
+
 function resolveWindow() {
 	try {
 		const raw = execFileSync("hyprctl", ["-j", "clients"], {
@@ -80,10 +94,25 @@ function resolveWindow() {
 			stdio: ["ignore", "pipe", "ignore"],
 		});
 		const clients = JSON.parse(raw);
+		let matches = [];
 		for (const pid of parentChain(process.pid)) {
-			const match = clients.find((client) => Number(client.pid) === pid);
-			if (match) return String(match.address || "");
+			const found = clients.filter((client) => Number(client.pid) === pid);
+			if (found.length > 0) {
+				matches = found;
+				break;
+			}
 		}
+		if (matches.length === 0) return "";
+		if (matches.length === 1) return String(matches[0].address || "");
+		// A single-instance terminal (ghostty, kitty) reports one pid for every
+		// window, so the parent chain cannot tell them apart. The window the user
+		// just typed in is this session's, so prefer the focused one, then the
+		// most recently focused.
+		const focused = activeWindowAddress();
+		const hit = matches.find((client) => String(client.address) === focused);
+		if (hit) return String(hit.address || "");
+		matches.sort((a, b) => (Number(a.focusHistoryID) || 1e9) - (Number(b.focusHistoryID) || 1e9));
+		return String(matches[0].address || "");
 	} catch {
 		// Not Hyprland, or hyprctl is unavailable. The record still works; the
 		// panel just cannot focus a window for it.
@@ -219,7 +248,13 @@ export default function (pi) {
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!enabled(ctx)) return;
 		runActive = true;
-		setState("working", { lastPrompt: truncate(event?.prompt, 240) });
+		// The user just submitted this prompt, so the focused window is this
+		// session's terminal. Re-resolving here pins a single-instance
+		// terminal's per-window address that the chain alone cannot pick.
+		setState("working", {
+			lastPrompt: truncate(event?.prompt, 240),
+			windowAddress: resolveWindow(),
+		});
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
