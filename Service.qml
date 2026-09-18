@@ -223,8 +223,14 @@ Item {
         : (session.cwd !== "" ? session.cwd : "finished")
     ])
     // Clicking the notification jumps to the terminal that produced it.
-    if (session.windowAddress !== "")
-      args = args.concat(["--exec", "hyprctl", "dispatch", "focuswindow", "address:" + session.windowAddress])
+    // Hyprland >= 0.56 with a Lua config reads `dispatch` as Lua and rejects
+    // the classic `focuswindow address:…`, so try the Lua form first and fall
+    // back — the same pair omarchy-launch-or-focus uses. The address goes into
+    // Lua source, so only a plain hex address is accepted.
+    if (/^0x[0-9a-fA-F]+$/.test(session.windowAddress))
+      args = args.concat(["--exec", "bash", "-c",
+        'hyprctl dispatch "hl.dsp.focus({ window = \\"address:$1\\" })" || hyprctl dispatch focuswindow "address:$1"',
+        "muster-focus", session.windowAddress])
     return args
   }
 
