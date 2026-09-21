@@ -121,6 +121,14 @@ fi
 
 have omarchy-notification-send "the desktop popup on completion"
 
+# herdr runs agent panes under a daemon, so a click needs its CLI to switch
+# back to the pane; only sessions inside herdr use it.
+if [[ ${HERDR_ENV:-} == "1" ]] || [[ -S ${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock} ]]; then
+  have herdr "switching to a session's herdr pane on click" required
+else
+  have herdr "switching to a session's herdr pane on click" optional
+fi
+
 # ---------------------------------------------------------------- output
 
 if ((json)); then

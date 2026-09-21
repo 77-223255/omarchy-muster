@@ -34,6 +34,7 @@ Usage: muster-report --agent <id> --session <id> [options]
   --message <text>     Detail for a blocked session
   --pid <n>            Owning process id (default: $PPID)
   --window <value>     Hyprland window address, "auto" (default) or "none"
+  --herdr-pane <id>    herdr pane to focus (default: $HERDR_PANE_ID when in herdr)
   --completed          Increment completedRuns: a run just settled
   --remove             Delete the record and exit
   --json               Print the resulting record
@@ -41,6 +42,7 @@ Usage: muster-report --agent <id> --session <id> [options]
 
 Environment:
   XDG_STATE_HOME       Defaults to ~/.local/state
+  HERDR_PANE_ID        Picked up as --herdr-pane when HERDR_ENV=1
 USAGE
 }
 
@@ -58,6 +60,8 @@ prompt=""
 message=""
 pid="$PPID"
 window="auto"
+herdr_pane=""
+[[ ${HERDR_ENV:-} == "1" ]] && herdr_pane="${HERDR_PANE_ID:-}"
 completed=0
 remove=0
 print_json=0
@@ -73,6 +77,7 @@ while (($# > 0)); do
   --message) message="${2:-}"; shift 2 ;;
   --pid) pid="${2:-}"; shift 2 ;;
   --window) window="${2:-}"; shift 2 ;;
+  --herdr-pane) herdr_pane="${2:-}"; shift 2 ;;
   --completed) completed=1; shift ;;
   --remove) remove=1; shift ;;
   --json) print_json=1; shift ;;
@@ -87,6 +92,9 @@ case "$state" in
 working | blocked | idle | unknown) ;;
 *) fail "--state must be working, blocked, idle, or unknown" ;;
 esac
+
+[[ -z $herdr_pane || $herdr_pane =~ ^[A-Za-z0-9:_.-]+$ ]] ||
+  fail "--herdr-pane must be a plain pane id"
 
 sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
 
@@ -126,7 +134,13 @@ resolve_window() {
     ((count > 0)) && break
     matches=""
   done
-  ((count > 0)) || return 0
+  if ((count == 0)); then
+    # herdr runs its panes under a daemon, so no ancestor owns a window. The
+    # report comes from the herdr UI, so the focused window is the one to use.
+    [[ -n $herdr_pane ]] || return 0
+    hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null || true
+    return 0
+  fi
 
   if ((count == 1)); then
     jq -r '.[0].address' <<<"$matches"
@@ -179,6 +193,7 @@ merged=$(jq -c \
   --arg message "$message" \
   --argjson pid "${pid:-0}" \
   --arg window "$window_address" \
+  --arg herdrPane "$herdr_pane" \
   --argjson now "$now" \
   --argjson completed "$completed" \
   '
@@ -195,6 +210,7 @@ merged=$(jq -c \
       lastPrompt: (if $prompt != "" then $prompt else ($old.lastPrompt // "") end),
       pid: $pid,
       windowAddress: $window,
+      herdrPane: $herdrPane,
       updatedAt: $now,
       completedRuns: (($old.completedRuns // 0) + $completed),
       seq: (($old.seq // 0) + 1)

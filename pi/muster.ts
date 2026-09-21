@@ -59,8 +59,13 @@ function truncate(text, limit) {
 //
 // The panel focuses the terminal a session lives in. hyprctl reports the PID
 // of the process that owns each window — normally the terminal emulator — so
-// walking our own parent chain finds it even when pi runs under a shell,
-// omarchy-launch-tui, or a multiplexer.
+// walking our own parent chain finds it even when pi runs under a shell or
+// omarchy-launch-tui.
+//
+// A daemon-based multiplexer is the exception: herdr runs every pane under
+// `herdr server`, which is parented by systemd, so no ancestor owns a window.
+// Those sessions get `herdrPane` instead, and fall back to the focused window
+// (the herdr UI the prompt was typed in) for the window address itself.
 
 function parentChain(pid) {
 	const chain = [];
@@ -93,6 +98,15 @@ function activeWindowAddress() {
 	}
 }
 
+// The pane a herdr-managed agent runs in, read from the environment herdr
+// injects into the pane. Empty when pi is not inside herdr. Only a plain
+// pane id is accepted, so the value can ride to the shell as data.
+function herdrPane() {
+	if (String(process.env.HERDR_ENV || "") !== "1") return "";
+	const pane = String(process.env.HERDR_PANE_ID || "");
+	return /^[A-Za-z0-9:_.-]+$/.test(pane) ? pane : "";
+}
+
 function resolveWindow() {
 	try {
 		const raw = execFileSync("hyprctl", ["-j", "clients"], {
@@ -109,7 +123,11 @@ function resolveWindow() {
 				break;
 			}
 		}
-		if (matches.length === 0) return "";
+		if (matches.length === 0) {
+			// Herdr panes have no terminal window in their ancestry. The prompt
+			// was submitted from the herdr UI, so the focused window is it.
+			return herdrPane() !== "" ? activeWindowAddress() : "";
+		}
 		if (matches.length === 1) return String(matches[0].address || "");
 		// A single-instance terminal (ghostty, kitty) reports one pid for every
 		// window, so the parent chain cannot tell them apart. The window the user
@@ -216,6 +234,7 @@ function startSession(pi, ctx) {
 		message: "",
 		pid: process.pid,
 		windowAddress: resolveWindow(),
+		herdrPane: herdrPane(),
 		updatedAt: Date.now(),
 		completedRuns: 0,
 		lastPrompt: truncate(lastUserPrompt(ctx), 240),
@@ -291,6 +310,7 @@ export default function (pi) {
 		setState("working", {
 			lastPrompt: truncate(event?.prompt, 240),
 			windowAddress: resolveWindow(),
+			herdrPane: herdrPane(),
 		});
 	});
 

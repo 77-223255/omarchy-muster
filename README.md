@@ -24,7 +24,8 @@ desktop notification — without running a terminal multiplexer.
   nothing. No elapsed timers: the panel answers "is anything running and does it
   need me".
 - **Alerts** — when a run finishes, a sound and an Omarchy notification.
-  Clicking the notification focuses that session's terminal. In the panel,
+  Clicking the notification focuses that session's terminal — and, for a
+  herdr-managed session, switches herdr to the pane it runs in. In the panel,
   **left-clicking a card** focuses that session's terminal too, and
   **right-clicking** one fires the same alert on demand, with `test` in the
   notification title so it cannot be mistaken for a real completion.
@@ -127,7 +128,7 @@ you doing it from the panel.
 ```bash
 omarchy-shell shienze.muster status | jq '.details[]'
 # {"agent":"pi","state":"working","folder":"tiny-model-primitives",
-#  "pid":835161,"completedRuns":3,"window":"0x601dc3f347b0"}
+#  "pid":835161,"completedRuns":3,"window":"0x601dc3f347b0","pane":""}
 ```
 
 ## Settings
@@ -168,6 +169,7 @@ One JSON object per session in
 | `lastPrompt` | shown on the card |
 | `pid` | owning process; also how duplicate records are collapsed |
 | `windowAddress` | Hyprland address; makes the notification's click focus that terminal |
+| `herdrPane` | herdr pane id (`w1:p6`); a herdr session's pane has no window of its own, so a click switches to it with `herdr agent focus` |
 | `updatedAt` | ms epoch; drives staleness (`staleAfterSec`) |
 | `completedRuns` | **the alert trigger** — increment once per finished run |
 | `seq` | monotonic writer counter, used to pick the freshest of two records for one pid |
@@ -225,7 +227,10 @@ $report --agent claude --session "$SESSION_ID" --remove
 
 It resolves the terminal window from `--pid` (default `$PPID`) through the
 Hyprland client list, so the notification's click focuses the right terminal
-without extra plumbing. A Claude Code `Stop` hook is then one line:
+without extra plumbing. Inside herdr the pane's process has no window in its
+ancestry (its parent is the `herdr server` daemon), so the report also records
+`$HERDR_PANE_ID` and the click switches herdr to that pane as well. A Claude
+Code `Stop` hook is then one line:
 
 ```jsonc
 // ~/.claude/settings.json

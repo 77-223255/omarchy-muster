@@ -203,7 +203,9 @@ $report --agent claude --session "$SESSION_ID" --remove
 ```
 
 它会用 `--pid`(默认 `$PPID`)沿进程链在 Hyprland 窗口列表里找到你所在的终端,
-所以"点通知聚焦终端"不需要额外配置。于是 Claude Code 的 `Stop` hook 只要一行:
+所以"点通知聚焦终端"不需要额外配置。在 herdr 里,pane 的进程祖先没有窗口
+(父进程是 `herdr server` 守护进程),所以记录里还会带上 `$HERDR_PANE_ID`,点击时
+顺便让 herdr 切到那个 pane。于是 Claude Code 的 `Stop` hook 只要一行:
 
 ```jsonc
 // ~/.claude/settings.json

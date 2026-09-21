@@ -177,7 +177,8 @@ BarWidget {
           folder: Model.folderLabel(session),
           pid: session.pid,
           completedRuns: session.completedRuns,
-          window: session.windowAddress
+          window: session.windowAddress,
+          pane: session.herdrPane
         })
       }
       return JSON.stringify({

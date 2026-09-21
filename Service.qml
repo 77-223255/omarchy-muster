@@ -309,23 +309,32 @@ Item {
       Quickshell.execDetached([root.soundPlayer, root.soundFile])
   }
 
-  // The argv that focuses the terminal a window address belongs to. Hyprland
-  // >= 0.56 with a Lua config reads `dispatch` as Lua and rejects the classic
-  // `focuswindow address:…`, so try the Lua form first and fall back — the same
-  // pair omarchy-launch-or-focus uses. The address goes into Lua source, so only
-  // a plain hex address is accepted.
-  function focusCommand(address) {
-    return ["bash", "-c",
-      'hyprctl dispatch "hl.dsp.focus({ window = \\"address:$1\\" })" || hyprctl dispatch focuswindow "address:$1"',
-      "muster-focus", address]
+  // The argv that focuses the session. A session is addressable two ways: a
+  // Hyprland window (any plain terminal) and, inside herdr, a pane. herdr runs
+  // its panes under a daemon, so the pane process has no terminal window in its
+  // ancestry — the window shown is the herdr client's, and the pane is moved to
+  // with `herdr agent focus`. Run the pane switch first, then bring the window
+  // forward. Hyprland >= 0.56 with a Lua config reads `dispatch` as Lua and
+  // rejects the classic `focuswindow address:…`, so try the Lua form first and
+  // fall back — the same pair omarchy-launch-or-focus uses. Both values go in as
+  // positional data, never as Lua/shell source, so only a plain hex address and
+  // a plain pane id are accepted.
+  function focusCommand(address, pane) {
+    var steps = []
+    if (/^[A-Za-z0-9:_.-]+$/.test(String(pane || "")))
+      steps.push('herdr agent focus "$2" >/dev/null 2>&1 || true')
+    if (/^0x[0-9a-fA-F]+$/.test(String(address || "")))
+      steps.push('hyprctl dispatch "hl.dsp.focus({ window = \\"address:$1\\" })" || hyprctl dispatch focuswindow "address:$1"')
+    if (steps.length === 0) return null
+    return ["bash", "-c", steps.join("\n"), "muster-focus",
+      String(address || ""), String(pane || "")]
   }
 
   // Left-clicking a panel card jumps to the session's terminal; a notification
   // click runs the same command.
   function focusSession(session) {
-    var address = String((session && session.windowAddress) || "")
-    if (!/^0x[0-9a-fA-F]+$/.test(address)) return
-    Quickshell.execDetached(root.focusCommand(address))
+    var argv = root.focusCommand(session && session.windowAddress, session && session.herdrPane)
+    if (argv) Quickshell.execDetached(argv)
   }
 
   function notificationCommand(session, isTest) {
@@ -343,8 +352,8 @@ Item {
         : (session.cwd !== "" ? session.cwd : "finished")
     ])
     // Clicking the notification jumps to the terminal that produced it.
-    if (/^0x[0-9a-fA-F]+$/.test(session.windowAddress))
-      args = args.concat(["--exec"]).concat(root.focusCommand(session.windowAddress))
+    var focus = root.focusCommand(session.windowAddress, session.herdrPane)
+    if (focus) args = args.concat(["--exec"]).concat(focus)
     return args
   }
 

@@ -111,6 +111,7 @@ function normalizeRecord(raw, path) {
     lastPrompt: typeof raw.lastPrompt === "string" ? raw.lastPrompt : "",
     pid: toNumber(raw.pid, 0),
     windowAddress: typeof raw.windowAddress === "string" ? raw.windowAddress : "",
+    herdrPane: typeof raw.herdrPane === "string" ? raw.herdrPane : "",
     updatedAt: toNumber(raw.updatedAt, 0),
     completedRuns: toNumber(raw.completedRuns, 0),
     seq: toNumber(raw.seq, 0)
