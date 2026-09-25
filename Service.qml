@@ -128,7 +128,10 @@ Item {
   Process {
     id: mkdirProcess
     running: false
-    command: ["mkdir", "-p", root.stateDir]
+    // Session records hold the last user prompt and the working directory, so
+    // the directory must stay owner-only. umask covers a fresh creation; the
+    // chmod repairs one an earlier version left world-readable.
+    command: ["bash", "-c", "umask 077; mkdir -p -- \"$1\"; chmod 700 -- \"$1\" 2>/dev/null || true", "muster-mkdir", root.stateDir]
     // Only watch the directory once it exists.
     onExited: inotifyProbe.running = true
   }

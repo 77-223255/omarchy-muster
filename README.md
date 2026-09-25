@@ -116,6 +116,11 @@ No file outside `~/.config/omarchy/`, `~/.local/state/omarchy/muster/` and the
 pi bridge symlink is touched, and no user configuration is overwritten without
 you doing it from the panel.
 
+**Privacy.** A record includes the last user prompt and the working directory.
+That state never leaves this machine, and the `sessions/` directory and its
+records are created owner-only (`0700` / `0600`) so another local user cannot
+read them. `muster-doctor` reports the modes if you want to check.
+
 ## Using it
 
 | Where | Action |

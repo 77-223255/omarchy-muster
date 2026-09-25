@@ -85,6 +85,20 @@ have inotifywait "showing a new session at once instead of on the next scan" opt
 
 if [[ -d $state_dir ]]; then
   record ok "sessions dir" "$state_dir ($(find "$state_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l) record(s))"
+  # A record carries the last user prompt and the working directory, so a
+  # group/other-readable directory or record is a leak, not a style nit.
+  dir_mode=$(stat -c '%a' "$state_dir" 2>/dev/null || echo unknown)
+  if find "$state_dir" -maxdepth 0 -perm /077 -print -quit 2>/dev/null | grep -q .; then
+    record missing "sessions dir mode" "$dir_mode — records hold prompts; run: chmod 700 $state_dir"
+  else
+    record ok "sessions dir mode" "$dir_mode (owner-only)"
+  fi
+  open_records=$(find "$state_dir" -maxdepth 1 -name '*.json' -perm /077 2>/dev/null | wc -l)
+  if ((open_records > 0)); then
+    record missing "record mode" "$open_records record(s) group/other-readable; run: chmod 600 $state_dir/*.json"
+  else
+    record ok "record mode" "records owner-only"
+  fi
 else
   record optional "sessions dir" "$state_dir (created on first write)"
 fi

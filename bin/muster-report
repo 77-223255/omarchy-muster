@@ -23,6 +23,12 @@
 
 set -euo pipefail
 
+# A record carries the last user prompt and the working directory, so nothing
+# this script creates may be readable by another local user. umask 077 makes
+# the record, its lock and its temp file owner-only; the chmods below also
+# repair a directory or record left behind world-readable by an older version.
+umask 077
+
 usage() {
   cat <<'USAGE'
 Usage: muster-report --agent <id> --session <id> [options]
@@ -100,6 +106,7 @@ sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
 
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster/sessions"
 mkdir -p "$state_dir"
+chmod 700 "$state_dir" 2>/dev/null || true
 file="$state_dir/$(sanitize "$agent")-$(sanitize "$session").json"
 
 if ((remove)); then
@@ -218,6 +225,7 @@ merged=$(jq -c \
   ' <<<"$old")
 
 printf '%s' "$merged" >"$file.tmp"
+chmod 600 "$file.tmp" 2>/dev/null || true
 mv -f "$file.tmp" "$file"
 
 ((print_json)) && printf '%s\n' "$merged"

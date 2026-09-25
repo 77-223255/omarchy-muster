@@ -100,6 +100,10 @@ rm -rf ~/Projects/omarchy-muster
 除了 `~/.config/omarchy/`、`~/.local/state/omarchy/muster/` 和那个 pi 桥接软链,
 它不碰任何文件;也不会在你不知情的情况下覆盖用户配置(改设置只有你在面板里点)。
 
+**隐私。** record 里包含最后一条用户 prompt 和工作目录。这些状态只留在本机,
+`sessions/` 目录及其中的 record 都以仅属主可读的权限创建(`0700` / `0600`),
+其他本地用户读不到。想核对权限可以运行 `muster-doctor`。
+
 ## 用法
 
 | 位置 | 操作 |

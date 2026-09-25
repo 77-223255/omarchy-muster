@@ -20,7 +20,7 @@
 // the watcher does not have to catch a working→idle transition mid-scan.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -34,6 +34,21 @@ function stateDir() {
 			? process.env.XDG_STATE_HOME
 			: join(homedir(), ".local", "state");
 	return join(base, "omarchy", "muster", "sessions");
+}
+
+// A record carries the last user prompt and the working directory, so the
+// directory and every record must stay owner-only. mkdirSync's mode only
+// applies at creation and is filtered through the process umask; the explicit
+// chmods also repair a path an earlier version left at 0755/0644.
+function privateStateDir() {
+	const dir = stateDir();
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	try {
+		chmodSync(dir, 0o700);
+	} catch {
+		// Best effort: a failed repair must never break the agent loop.
+	}
+	return dir;
 }
 
 function sanitize(value) {
@@ -185,7 +200,12 @@ function writeRecord() {
 	if (!recordFile || !record) return;
 	try {
 		const tmp = `${recordFile}.tmp`;
-		writeFileSync(tmp, JSON.stringify(record));
+		writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
+		try {
+			chmodSync(tmp, 0o600);
+		} catch {
+			// Best effort; the rename below still publishes the record.
+		}
 		renameSync(tmp, recordFile);
 	} catch {
 		// A failed status write must never break the agent loop.
@@ -202,7 +222,7 @@ function touch(extra) {
 
 function startSession(pi, ctx) {
 	try {
-		mkdirSync(stateDir(), { recursive: true });
+		privateStateDir();
 	} catch {
 		return;
 	}
