@@ -3,6 +3,11 @@
 // Pure helpers for the muster plugin. Nothing here touches QML objects,
 // so the file can be shared by the service, the bar widget and the panel.
 
+// A record is a handful of fields. The reader caps every read at this many
+// bytes so a large file cannot be pulled into the long-lived shell; anything
+// longer is not a record and is dropped unparsed.
+var MAX_RECORD_BYTES = 65536
+
 // Every agent omarchy ships as a selectable default (`omarchy default agent`),
 // with the ids and aliases that command accepts, and the mark omarchy's own
 // menu uses for it: `font: "omarchy"` is a brand glyph in

@@ -198,12 +198,12 @@ Item {
       if (path !== "") paths.push(path)
     }
     paths.sort()
-    // Same list, same watchers: reassigning would tear down every FileView
+    // Same list, same watchers: reassigning would tear down every Record
     // just to build identical ones.
     if (JSON.stringify(paths) !== JSON.stringify(recordPaths)) recordPaths = paths
-    // A record rewritten by rename() can outrun inotify's file watch, so the
-    // scan tick also re-reads every record. JSON files this small make that
-    // cheaper than reasoning about which platforms drop the watch.
+    // The directory watch only reports create, delete and rename, and a writer
+    // may also rewrite a record in place. Re-reading every record on the scan
+    // tick keeps those changes visible; one record is a single capped read.
     root.forceReload()
   }
 

@@ -117,9 +117,14 @@ pi bridge symlink is touched, and no user configuration is overwritten without
 you doing it from the panel.
 
 **Privacy.** A record includes the last user prompt and the working directory.
-That state never leaves this machine, and the `sessions/` directory and its
+That state never leaves this machine. The `sessions/` directory and its
 records are created owner-only (`0700` / `0600`) so another local user cannot
-read them. `muster-doctor` reports the modes if you want to check.
+read them, and `muster-doctor` reports the modes if you want to check.
+
+The reader treats a record as untrusted: it refuses to follow a symlink,
+refuses anything that is not a plain file, and reads at most 64 KiB, so a
+record an agent writes cannot point the shell at another file, make it wait on
+a special file, or make it read without bound.
 
 ## Using it
 

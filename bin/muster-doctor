@@ -81,6 +81,7 @@ fi
 have hyprctl "focusing an agent's terminal on click"
 have find "enumerating session records"
 have mkdir "creating the sessions directory"
+have dd "reading a record without following a symlink or blocking on a special file"
 have inotifywait "showing a new session at once instead of on the next scan" optional
 
 if [[ -d $state_dir ]]; then
@@ -98,6 +99,20 @@ if [[ -d $state_dir ]]; then
     record missing "record mode" "$open_records record(s) group/other-readable; run: chmod 600 $state_dir/*.json"
   else
     record ok "record mode" "records owner-only"
+  fi
+  # The reader refuses a symlink, a special file and an oversized record, so a
+  # bad one is a silent missing session; surface it instead.
+  bad_type=$(find "$state_dir" -maxdepth 1 -name '*.json' ! -type f 2>/dev/null | wc -l)
+  if ((bad_type > 0)); then
+    record missing "record type" "$bad_type record(s) are not plain files; the reader refuses them"
+  else
+    record ok "record type" "records are plain files"
+  fi
+  oversized=$(find "$state_dir" -maxdepth 1 -name '*.json' -type f -size +64k 2>/dev/null | wc -l)
+  if ((oversized > 0)); then
+    record missing "record size" "$oversized record(s) over 64 KiB; the reader refuses them"
+  else
+    record ok "record size" "records are within 64 KiB"
   fi
 else
   record optional "sessions dir" "$state_dir (created on first write)"
