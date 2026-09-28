@@ -51,8 +51,8 @@ alerts; the marketplace card itself still reads only `preview.png`.
       registry (`shienze.muster` — checked against `registry.json`)
 - [x] Repository is clean of binaries, downloads, and `/tmp` runtime state, so
       the automated security baseline has nothing to flag
-- [ ] Root `preview.png`
-- [ ] `assets/panel.png`, `assets/chip.png` and `assets/notification.png`
+- [x] Root `preview.png`
+- [x] `assets/panel.png`, `assets/chip.png` and `assets/notification.png`
 
 ## After the issue opens
 

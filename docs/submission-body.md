@@ -28,6 +28,15 @@ and only affects pi; any other agent can be wired with the one-line
 `bin/muster-report` call documented in the README. Removing the plugin leaves
 nothing behind except that state directory.
 
+The records are owner-only (`0700`/`0600`), and `bin/muster-report` reads the
+prompt and blocked detail from a file descriptor (`--prompt-fd`/`--message-fd`),
+not a command-line argument, so user text never reaches a process's argv. The
+completion toast is content-free by default — the agent and a fixed state word,
+never the prompt. The version that does show the prompt is kept commented in
+`Service.qml` and documented as opt-in, because omarchy's notification path
+takes the text as argv and then persists it (upstream `basecamp/omarchy#8209`,
+fix `#8259` pending). The content toast returns once that path is private.
+
 The bar marks are omarchy's own agent glyphs, copied from
 `setup.default.agent.*` in
 `/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc` (eight codepoints in
