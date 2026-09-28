@@ -113,21 +113,12 @@ rm -rf ~/Projects/omarchy-muster
 
 ## 通知内容
 
-完成提醒是刻意不带正文的:它只写 agent 和状态("Run finished" / "Needs your
-input"),不写 prompt。prompt 仍然显示在面板卡片上,那读的是仅属主可读的 record。
-
-这不是疏忽。omarchy 的通知链把 summary 和 body 当命令行参数传
-(`omarchy-notification-send` → `busctl`),随后又把它们持久化到
-`~/.local/state/omarchy/notifications/`。所以把 prompt 放进提醒,其他本地用户就能
-从 `/proc/<pid>/cmdline` 读到,并且它会留在磁盘上。带正文的那版代码原样保留在
-`Service.qml` 里、紧跟在安全的 `notificationCommand` 之后,整块注释掉了。
-
-想启用:删掉安全的 `notificationCommand`,取消下面那块的注释,然后
-`omarchy restart shell`。只有在你接受这个暴露时才这么做——它是上游问题、目前
-没修。等 omarchy 给通知链一条私有通道
+提醒默认不带正文——只写 agent 和状态,不写 prompt——因为 omarchy 的通知链把文本当
+命令行参数传并持久化,放进提醒就会从 `/proc/<pid>/cmdline` 泄漏、也会留在磁盘上
 ([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209),
-修复 [#8259](https://github.com/basecamp/omarchy/pull/8259) 待合并),带正文的
-提醒就安全了,届时会重新启用。
+修复 [#8259](https://github.com/basecamp/omarchy/pull/8259) 待合并)。带正文的那版
+原样注释保留在 `Service.qml` 里;要启用就删掉安全的 `notificationCommand`、取消
+下面那块的注释,然后 `omarchy restart shell`。
 
 ## 用法
 

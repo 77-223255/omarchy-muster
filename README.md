@@ -132,24 +132,14 @@ a special file, or make it read without bound.
 
 ## Notification content
 
-The completion toast is deliberately content-free. It names the agent and the
-state — "Run finished", "Needs your input" — never the prompt. The prompt is
-still on the panel card, which reads the owner-only record.
-
-That is not an oversight. omarchy's notification path takes the summary and
-body as process arguments (`omarchy-notification-send` → `busctl`) and then
-persists them under `~/.local/state/omarchy/notifications/`, so a prompt placed
-in the toast would be readable by other local users from
-`/proc/<pid>/cmdline` and kept on disk. The version that does show the prompt
-is shipped commented out, immediately below the safe `notificationCommand` in
-`Service.qml`.
-
-To opt in: delete the safe `notificationCommand`, uncomment the block below it,
-and `omarchy restart shell`. Do this only if you accept the exposure — it is
-upstream and not fixed yet. When omarchy gives the notification path a private
-channel ([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209),
-fix [#8259](https://github.com/basecamp/omarchy/pull/8259) pending), the content
-toast becomes safe and will be enabled again.
+The toast ships content-free — the agent and a fixed state word, not the prompt
+— because omarchy's notification path takes the text as process arguments and
+persists it, so a prompt there would be readable from `/proc/<pid>/cmdline` and
+kept on disk ([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209),
+fix [#8259](https://github.com/basecamp/omarchy/pull/8259) pending). The version
+that does show the prompt is kept commented in `Service.qml`; to opt in, delete
+the safe `notificationCommand`, uncomment the block below it, and
+`omarchy restart shell`.
 
 ## Using it
 
