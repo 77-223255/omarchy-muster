@@ -119,12 +119,37 @@ you doing it from the panel.
 **Privacy.** A record includes the last user prompt and the working directory.
 That state never leaves this machine. The `sessions/` directory and its
 records are created owner-only (`0700` / `0600`) so another local user cannot
-read them, and `muster-doctor` reports the modes if you want to check.
+read them, and `muster-doctor` reports the modes if you want to check. The
+writer never passes that text as a command-line argument, where any local
+process could read it from `/proc/<pid>/cmdline`: `bin/muster-report` takes the
+prompt on a file descriptor (`--prompt-fd`) and hands it to `jq` as a private
+file, never as `--arg`.
 
 The reader treats a record as untrusted: it refuses to follow a symlink,
 refuses anything that is not a plain file, and reads at most 64 KiB, so a
 record an agent writes cannot point the shell at another file, make it wait on
 a special file, or make it read without bound.
+
+## Notification content
+
+The completion toast is deliberately content-free. It names the agent and the
+state — "Run finished", "Needs your input" — never the prompt. The prompt is
+still on the panel card, which reads the owner-only record.
+
+That is not an oversight. omarchy's notification path takes the summary and
+body as process arguments (`omarchy-notification-send` → `busctl`) and then
+persists them under `~/.local/state/omarchy/notifications/`, so a prompt placed
+in the toast would be readable by other local users from
+`/proc/<pid>/cmdline` and kept on disk. The version that does show the prompt
+is shipped commented out, immediately below the safe `notificationCommand` in
+`Service.qml`.
+
+To opt in: delete the safe `notificationCommand`, uncomment the block below it,
+and `omarchy restart shell`. Do this only if you accept the exposure — it is
+upstream and not fixed yet. When omarchy gives the notification path a private
+channel ([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209),
+fix [#8259](https://github.com/basecamp/omarchy/pull/8259) pending), the content
+toast becomes safe and will be enabled again.
 
 ## Using it
 
@@ -228,12 +253,18 @@ given). Adding an agent is one line in the `AGENTS` table at the top of
 ```bash
 report=~/.config/omarchy/plugins/shienze.muster/bin/muster-report
 
-$report --agent claude --session "$SESSION_ID" --state working \
-        --name "Refactor auth" --cwd "$PWD" --prompt "$PROMPT"
-$report --agent claude --session "$SESSION_ID" --state blocked --message "approve"
+printf '%s' "$PROMPT" | $report --agent claude --session "$SESSION_ID" \
+        --state working --name "Refactor auth" --cwd "$PWD" --prompt-fd 0
+printf '%s' "approve" | $report --agent claude --session "$SESSION_ID" \
+        --state blocked --message-fd 0
 $report --agent claude --session "$SESSION_ID" --state idle --completed  # chime + popup
 $report --agent claude --session "$SESSION_ID" --remove
 ```
+
+The prompt and the blocked detail go in on a file descriptor
+(`--prompt-fd` / `--message-fd`), never as arguments — a command line is
+world-readable through `/proc/<pid>/cmdline` while the process runs. `0` is
+stdin; any other descriptor works too.
 
 It resolves the terminal window from `--pid` (default `$PPID`) through the
 Hyprland client list, so the notification's click focuses the right terminal

@@ -103,10 +103,31 @@ rm -rf ~/Projects/omarchy-muster
 **隐私。** record 里包含最后一条用户 prompt 和工作目录。这些状态只留在本机,
 不会离开这台机器。`sessions/` 目录及其中的 record 都以仅属主可读的权限创建
 (`0700` / `0600`),其他本地用户读不到;想核对权限可以运行 `muster-doctor`。
+写入端也不会把这段文本当作命令行参数——进程的命令行在运行期间对任何本地用户
+都是可读的(`/proc/<pid>/cmdline`);`bin/muster-report` 把 prompt 从文件描述符
+(`--prompt-fd`)读进来,并以私有文件交给 `jq`,不用 `--arg`。
 
 读取端不信任 record:它拒绝跟随符号链接、拒绝任何非普通文件,并且每次最多
 只读 64 KiB。因此一个 agent 写下的 record 既不能让 shell 转去读别的文件,
 也不能让它在特殊文件上阻塞,更不能让它无上限地占用内存。
+
+## 通知内容
+
+完成提醒是刻意不带正文的:它只写 agent 和状态("Run finished" / "Needs your
+input"),不写 prompt。prompt 仍然显示在面板卡片上,那读的是仅属主可读的 record。
+
+这不是疏忽。omarchy 的通知链把 summary 和 body 当命令行参数传
+(`omarchy-notification-send` → `busctl`),随后又把它们持久化到
+`~/.local/state/omarchy/notifications/`。所以把 prompt 放进提醒,其他本地用户就能
+从 `/proc/<pid>/cmdline` 读到,并且它会留在磁盘上。带正文的那版代码原样保留在
+`Service.qml` 里、紧跟在安全的 `notificationCommand` 之后,整块注释掉了。
+
+想启用:删掉安全的 `notificationCommand`,取消下面那块的注释,然后
+`omarchy restart shell`。只有在你接受这个暴露时才这么做——它是上游问题、目前
+没修。等 omarchy 给通知链一条私有通道
+([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209),
+修复 [#8259](https://github.com/basecamp/omarchy/pull/8259) 待合并),带正文的
+提醒就安全了,届时会重新启用。
 
 ## 用法
 
@@ -203,12 +224,17 @@ omarchy-shell shienze.muster status | jq '.details[]'
 ```bash
 report=~/.config/omarchy/plugins/shienze.muster/bin/muster-report
 
-$report --agent claude --session "$SESSION_ID" --state working \
-        --name "Refactor auth" --cwd "$PWD" --prompt "$PROMPT"
-$report --agent claude --session "$SESSION_ID" --state blocked --message "approve"
+printf '%s' "$PROMPT" | $report --agent claude --session "$SESSION_ID" \
+        --state working --name "Refactor auth" --cwd "$PWD" --prompt-fd 0
+printf '%s' "approve" | $report --agent claude --session "$SESSION_ID" \
+        --state blocked --message-fd 0
 $report --agent claude --session "$SESSION_ID" --state idle --completed  # 响一声 + 弹窗
 $report --agent claude --session "$SESSION_ID" --remove
 ```
+
+prompt 和 blocked 详情从文件描述符传入(`--prompt-fd` / `--message-fd`),不走参数
+—— 进程命令行在运行期间对本地用户可读(`/proc/<pid>/cmdline`)。`0` 就是 stdin,
+其他描述符也行。
 
 它会用 `--pid`(默认 `$PPID`)沿进程链在 Hyprland 窗口列表里找到你所在的终端,
 所以"点通知聚焦终端"不需要额外配置。在 herdr 里,pane 的进程祖先没有窗口

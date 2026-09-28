@@ -340,8 +340,18 @@ Item {
     if (argv) Quickshell.execDetached(argv)
   }
 
+  // The completion toast. It deliberately carries no session content: omarchy's
+  // notification service takes the summary and body as process arguments
+  // (omarchy-notification-send -> busctl) and then persists them under
+  // ~/.local/state/omarchy/notifications/, so a prompt placed here would be
+  // readable by other local users from /proc/<pid>/cmdline and kept on disk.
+  // The summary and body below are built only from non-content fields: the
+  // agent's label from Model.AGENTS and a fixed state word.
   function notificationCommand(session, isTest) {
-    var subject = (isTest === true ? "test  ·  " : "alert  ·  ") + session.title
+    var subject = isTest === true ? "Muster"
+      : "Muster  ·  " + String(session.agentLabel || session.agent || "agent")
+    var body = isTest === true ? "Test alert"
+      : (session.state === "blocked" ? "Needs your input" : "Run finished")
     var args = ["omarchy-notification-send", "-u", "normal"]
     var mark = String(session.agentIcon || "")
     if (mark !== "") {
@@ -349,16 +359,49 @@ Item {
         : (session.state === "blocked" ? "-blocked" : "")
       args = args.concat(["-i", root.marksDir + "/" + session.agent + state + ".svg"])
     }
-    args = args.concat([
-      subject,
-      session.lastPrompt !== "" ? Model.truncate(session.lastPrompt, 180)
-        : (session.cwd !== "" ? session.cwd : "finished")
-    ])
+    args = args.concat([subject, body])
     // Clicking the notification jumps to the terminal that produced it.
     var focus = root.focusCommand(session.windowAddress, session.herdrPane)
     if (focus) args = args.concat(["--exec"]).concat(focus)
     return args
   }
+
+  // -----------------------------------------------------------------------
+  // OPT-IN CONTENT TOAST — UNSAFE, DISABLED ON PURPOSE
+  //
+  // This is the version that puts the session's title and last user prompt in
+  // the toast. It is kept, verbatim, so it can be switched on the day upstream
+  // gives the notification path a private channel — see
+  // basecamp/omarchy#8209 (the fix, basecamp/omarchy#8259, is still unmerged).
+  //
+  // It is not enabled because the text travels through the argv of both
+  // omarchy-notification-send and busctl, and omarchy's notification service
+  // then writes it to ~/.local/state/omarchy/notifications/ (mode 0644).
+  // Another local user can read it from /proc/<pid>/cmdline and, when the home
+  // directory is traversable, from that file. The marketplace build therefore
+  // ships the safe notificationCommand above.
+  //
+  // To opt in: delete the safe notificationCommand above, uncomment the block
+  // below and `omarchy restart shell`. You accept the exposure.
+  //
+  // function notificationCommand(session, isTest) {
+  //   var subject = (isTest === true ? "test  ·  " : "alert  ·  ") + session.title
+  //   var args = ["omarchy-notification-send", "-u", "normal"]
+  //   var mark = String(session.agentIcon || "")
+  //   if (mark !== "") {
+  //     var state = session.state === "working" ? "-working"
+  //       : (session.state === "blocked" ? "-blocked" : "")
+  //     args = args.concat(["-i", root.marksDir + "/" + session.agent + state + ".svg"])
+  //   }
+  //   args = args.concat([
+  //     subject,
+  //     session.lastPrompt !== "" ? Model.truncate(session.lastPrompt, 180)
+  //       : (session.cwd !== "" ? session.cwd : "finished")
+  //   ])
+  //   var focus = root.focusCommand(session.windowAddress, session.herdrPane)
+  //   if (focus) args = args.concat(["--exec"]).concat(focus)
+  //   return args
+  // }
 
   // Right-clicking a panel card, the chip's middle click, and the `test` IPC
   // all land here, so the alert path can be checked without waiting for a real

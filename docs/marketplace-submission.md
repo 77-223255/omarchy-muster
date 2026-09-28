@@ -37,7 +37,9 @@ The marketplace card comes from one optional root `preview.png` (also
 
 - `preview.png` — repository root, the listing card. A wide crop of the open
   panel works; keep the chip visible.
-- `assets/panel.png`, `assets/chip.png` — referenced by the READMEs.
+- `assets/panel.png`, `assets/chip.png`, `assets/notification.png` — referenced
+  by the READMEs. `notification.png` is the one that shows the completion
+alerts; the marketplace card itself still reads only `preview.png`.
 
 ## Checklist before submitting
 
@@ -50,7 +52,7 @@ The marketplace card comes from one optional root `preview.png` (also
 - [x] Repository is clean of binaries, downloads, and `/tmp` runtime state, so
       the automated security baseline has nothing to flag
 - [ ] Root `preview.png`
-- [ ] `assets/panel.png` and `assets/chip.png`
+- [ ] `assets/panel.png`, `assets/chip.png` and `assets/notification.png`
 
 ## After the issue opens
 
