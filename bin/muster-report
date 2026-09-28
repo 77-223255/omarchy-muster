@@ -4,15 +4,16 @@
 # pi. Any integration can call this to publish a session record; the plugin
 # watches the sessions directory and never talks to the agent itself.
 #
-#   # a run started
-#   muster-report --agent claude --session "$ID" --state working \
-#     --name "Refactor auth" --cwd "$PWD" --prompt "refactor the auth module"
+#   # a run started — the prompt arrives on stdin, never as an argument
+#   printf '%s' "$PROMPT" | muster-report --agent claude --session "$ID" \
+#     --state working --name "Refactor auth" --cwd "$PWD" --prompt-fd 0
 #
 #   # a run finished (this is what triggers the sound + notification)
 #   muster-report --agent claude --session "$ID" --state idle --completed
 #
 #   # waiting on the user
-#   muster-report --agent claude --session "$ID" --state blocked --message "approve the patch"
+#   printf '%s' "approve the patch" | muster-report --agent claude --session "$ID" \
+#     --state blocked --message-fd 0
 #
 #   # gone
 #   muster-report --agent claude --session "$ID" --remove
@@ -36,8 +37,8 @@ Usage: muster-report --agent <id> --session <id> [options]
   --state <working|blocked|idle|unknown>  Session state (default: working)
   --name <text>        Display name for the session
   --cwd <path>         Working directory (default: $PWD)
-  --prompt <text>      Last user prompt, shown on the panel card
-  --message <text>     Detail for a blocked session
+  --prompt-fd <n>      Read the last prompt from descriptor n (never argv)
+  --message-fd <n>     Read the blocked detail from descriptor n (never argv)
   --pid <n>            Owning process id (default: $PPID)
   --window <value>     Hyprland window address, "auto" (default) or "none"
   --herdr-pane <id>    herdr pane to focus (default: $HERDR_PANE_ID when in herdr)
@@ -64,6 +65,8 @@ name=""
 cwd="$PWD"
 prompt=""
 message=""
+prompt_fd=""
+message_fd=""
 pid="$PPID"
 window="auto"
 herdr_pane=""
@@ -79,8 +82,10 @@ while (($# > 0)); do
   --state) state="${2:-}"; shift 2 ;;
   --name) name="${2:-}"; shift 2 ;;
   --cwd) cwd="${2:-}"; shift 2 ;;
-  --prompt) prompt="${2:-}"; shift 2 ;;
-  --message) message="${2:-}"; shift 2 ;;
+  --prompt-fd) prompt_fd="${2:-}"; shift 2 ;;
+  --message-fd) message_fd="${2:-}"; shift 2 ;;
+  --prompt | --message)
+    fail "$1 puts user text on the process command line; pipe it to --prompt-fd/--message-fd instead" ;;
   --pid) pid="${2:-}"; shift 2 ;;
   --window) window="${2:-}"; shift 2 ;;
   --herdr-pane) herdr_pane="${2:-}"; shift 2 ;;
@@ -101,6 +106,26 @@ esac
 
 [[ -z $herdr_pane || $herdr_pane =~ ^[A-Za-z0-9:_.-]+$ ]] ||
   fail "--herdr-pane must be a plain pane id"
+
+# The prompt and the blocked detail are user text, so they never travel as
+# arguments: a process's argv is world-readable through /proc/<pid>/cmdline
+# while it runs, and no file mode can protect a value handed over that way.
+# They arrive on a file descriptor instead —
+#   printf '%s' "$PROMPT" | muster-report ... --prompt-fd 0
+# `IFS=` keeps leading and trailing whitespace, `-d ''` reads to end of file,
+# and `read` is a shell builtin, so no child process ever sees the value.
+read_fd() {
+  local fd="$1" value=""
+  IFS= read -r -d '' value <&"$fd" || true
+  printf '%s' "$value"
+}
+
+[[ -z $prompt_fd || $prompt_fd =~ ^[0-9]+$ ]] ||
+  fail "--prompt-fd must be a descriptor number"
+[[ -z $message_fd || $message_fd =~ ^[0-9]+$ ]] ||
+  fail "--message-fd must be a descriptor number"
+[[ -n $prompt_fd ]] && prompt=$(read_fd "$prompt_fd")
+[[ -n $message_fd ]] && message=$(read_fd "$message_fd")
 
 sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
 
@@ -196,8 +221,8 @@ merged=$(jq -c \
   --arg name "$name" \
   --arg cwd "$cwd" \
   --arg project "$project" \
-  --arg prompt "$prompt" \
-  --arg message "$message" \
+  --rawfile prompt <(printf '%s' "$prompt") \
+  --rawfile message <(printf '%s' "$message") \
   --argjson pid "${pid:-0}" \
   --arg window "$window_address" \
   --arg herdrPane "$herdr_pane" \
