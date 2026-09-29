@@ -30,7 +30,14 @@ nothing behind except that state directory.
 
 The records are owner-only (`0700`/`0600`), and `bin/muster-report` reads the
 prompt and blocked detail from a file descriptor (`--prompt-fd`/`--message-fd`),
-not a command-line argument, so user text never reaches a process's argv. The
+not a command-line argument, so user text never reaches a process's argv. It
+also refuses a sessions path that is not a real directory owned by the user,
+locks that directory read-only rather than a predictable lock file, and stages
+each record in an exclusive `mktemp` file written with `O_NOFOLLOW`, so a
+same-user writer cannot redirect a write through a planted symlink. Fields are
+capped, `--pid` is validated as numeric before it reaches bash arithmetic, and
+the shell service applies the same directory check before it creates or watches
+the path. The
 completion toast is content-free by default — the agent and a fixed state word,
 never the prompt. The version that does show the prompt is kept commented in
 `Service.qml` and documented as opt-in, because omarchy's notification path

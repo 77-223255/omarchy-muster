@@ -105,7 +105,14 @@ rm -rf ~/Projects/omarchy-muster
 (`0700` / `0600`),其他本地用户读不到;想核对权限可以运行 `muster-doctor`。
 写入端也不会把这段文本当作命令行参数——进程的命令行在运行期间对任何本地用户
 都是可读的(`/proc/<pid>/cmdline`);`bin/muster-report` 把 prompt 从文件描述符
-(`--prompt-fd`)读进来,并以私有文件交给 `jq`,不用 `--arg`。
+(`--prompt-fd`)读进来,并以私有文件交给 `jq`,不用 `--arg`。`--name-fd` 和
+`--cwd-fd` 出于同样的理由存在;直接传 `--name`/`--cwd` 会出现在 argv 里。每个
+字段都有上限(prompt/message 240 字符、name 80、cwd 1024),所以一条 record
+不会超过读取端接受的 64 KiB;`--pid` 必须是数字,因为它会进入 bash 算术。它还会
+拒绝一个不是“由你拥有的真实目录”的 `sessions/` 路径,以只读方式锁住该目录(而不是
+一个可预测的锁文件),并把每条 record 暂存在独占创建的 `mktemp` 文件里、以
+`O_NOFOLLOW` 写入后再原子改名——同用户的写入者无法通过预埋软链接把写入重定向到
+另一个文件。
 
 读取端不信任 record:它拒绝跟随符号链接、拒绝任何非普通文件,并且每次最多
 只读 64 KiB。因此一个 agent 写下的 record 既不能让 shell 转去读别的文件,
@@ -216,7 +223,7 @@ omarchy-shell shienze.muster status | jq '.details[]'
 report=~/.config/omarchy/plugins/shienze.muster/bin/muster-report
 
 printf '%s' "$PROMPT" | $report --agent claude --session "$SESSION_ID" \
-        --state working --name "Refactor auth" --cwd "$PWD" --prompt-fd 0
+        --state working --name "Refactor auth" --prompt-fd 0
 printf '%s' "approve" | $report --agent claude --session "$SESSION_ID" \
         --state blocked --message-fd 0
 $report --agent claude --session "$SESSION_ID" --state idle --completed  # 响一声 + 弹窗
@@ -225,7 +232,8 @@ $report --agent claude --session "$SESSION_ID" --remove
 
 prompt 和 blocked 详情从文件描述符传入(`--prompt-fd` / `--message-fd`),不走参数
 —— 进程命令行在运行期间对本地用户可读(`/proc/<pid>/cmdline`)。`0` 就是 stdin,
-其他描述符也行。
+其他描述符也行。工作目录默认就是调用者的 `$PWD`,不需要 `--cwd`;`--name-fd` 和
+`--cwd-fd` 用来传入你不想放到命令行上的值。
 
 它会用 `--pid`(默认 `$PPID`)沿进程链在 Hyprland 窗口列表里找到你所在的终端,
 所以"点通知聚焦终端"不需要额外配置。在 herdr 里,pane 的进程祖先没有窗口

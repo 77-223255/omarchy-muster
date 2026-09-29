@@ -6,7 +6,7 @@
 #
 #   # a run started — the prompt arrives on stdin, never as an argument
 #   printf '%s' "$PROMPT" | muster-report --agent claude --session "$ID" \
-#     --state working --name "Refactor auth" --cwd "$PWD" --prompt-fd 0
+#     --state working --name "Refactor auth" --prompt-fd 0
 #
 #   # a run finished (this is what triggers the sound + notification)
 #   muster-report --agent claude --session "$ID" --state idle --completed
@@ -26,8 +26,8 @@ set -euo pipefail
 
 # A record carries the last user prompt and the working directory, so nothing
 # this script creates may be readable by another local user. umask 077 makes
-# the record, its lock and its temp file owner-only; the chmods below also
-# repair a directory or record left behind world-readable by an older version.
+# the staging file owner-only; the chmods below also repair a directory or
+# record left behind world-readable by an older version.
 umask 077
 
 usage() {
@@ -35,8 +35,10 @@ usage() {
 Usage: muster-report --agent <id> --session <id> [options]
 
   --state <working|blocked|idle|unknown>  Session state (default: working)
-  --name <text>        Display name for the session
-  --cwd <path>         Working directory (default: $PWD)
+  --name <text>        Display name (argv-visible; prefer --name-fd)
+  --name-fd <n>        Read the display name from descriptor n (never argv)
+  --cwd <path>         Working directory (default: $PWD; argv-visible)
+  --cwd-fd <n>         Read the working directory from descriptor n (never argv)
   --prompt-fd <n>      Read the last prompt from descriptor n (never argv)
   --message-fd <n>     Read the blocked detail from descriptor n (never argv)
   --pid <n>            Owning process id (default: $PPID)
@@ -67,6 +69,8 @@ prompt=""
 message=""
 prompt_fd=""
 message_fd=""
+name_fd=""
+cwd_fd=""
 pid="$PPID"
 window="auto"
 herdr_pane=""
@@ -84,6 +88,8 @@ while (($# > 0)); do
   --cwd) cwd="${2:-}"; shift 2 ;;
   --prompt-fd) prompt_fd="${2:-}"; shift 2 ;;
   --message-fd) message_fd="${2:-}"; shift 2 ;;
+  --name-fd) name_fd="${2:-}"; shift 2 ;;
+  --cwd-fd) cwd_fd="${2:-}"; shift 2 ;;
   --prompt | --message)
     fail "$1 puts user text on the process command line; pipe it to --prompt-fd/--message-fd instead" ;;
   --pid) pid="${2:-}"; shift 2 ;;
@@ -106,17 +112,27 @@ esac
 
 [[ -z $herdr_pane || $herdr_pane =~ ^[A-Za-z0-9:_.-]+$ ]] ||
   fail "--herdr-pane must be a plain pane id"
+# `--pid` reaches bash arithmetic in resolve_window, and arithmetic recursively
+# evaluates its input, so a non-numeric value is command execution:
+#   --pid 'i[$(id)]'  runs `id`
+# `set -u` does not prevent that because the array names used there are defined
+# locals. A number is the only accepted value.
+[[ $pid =~ ^[0-9]+$ ]] || fail "--pid must be a number"
+# Every stored field is capped so one record can never exceed the reader's cap
+# and the shell never holds an unbounded value.
+agent=${agent:0:120}
+session=${session:0:120}
+name=${name:0:80}
+cwd=${cwd:0:1024}
 
-# The prompt and the blocked detail are user text, so they never travel as
-# arguments: a process's argv is world-readable through /proc/<pid>/cmdline
-# while it runs, and no file mode can protect a value handed over that way.
-# They arrive on a file descriptor instead —
-#   printf '%s' "$PROMPT" | muster-report ... --prompt-fd 0
-# `IFS=` keeps leading and trailing whitespace, `-d ''` reads to end of file,
-# and `read` is a shell builtin, so no child process ever sees the value.
+# User text and paths never travel as arguments when a caller can pass a file
+# descriptor instead: a process's argv is world-readable through
+# /proc/<pid>/cmdline while it runs, and no file mode can protect a value
+# handed over that way. `read` is a shell builtin, and each read is capped so
+# neither the shell nor the record can grow without bound.
 read_fd() {
-  local fd="$1" value=""
-  IFS= read -r -d '' value <&"$fd" || true
+  local fd="$1" cap="$2" value=""
+  IFS= read -r -N "$cap" value <&"$fd" || true
   printf '%s' "$value"
 }
 
@@ -124,17 +140,64 @@ read_fd() {
   fail "--prompt-fd must be a descriptor number"
 [[ -z $message_fd || $message_fd =~ ^[0-9]+$ ]] ||
   fail "--message-fd must be a descriptor number"
-[[ -n $prompt_fd ]] && prompt=$(read_fd "$prompt_fd")
-[[ -n $message_fd ]] && message=$(read_fd "$message_fd")
+[[ -z $name_fd || $name_fd =~ ^[0-9]+$ ]] ||
+  fail "--name-fd must be a descriptor number"
+[[ -z $cwd_fd || $cwd_fd =~ ^[0-9]+$ ]] ||
+  fail "--cwd-fd must be a descriptor number"
+[[ -n $prompt_fd ]] && prompt=$(read_fd "$prompt_fd" 240)
+[[ -n $message_fd ]] && message=$(read_fd "$message_fd" 240)
+[[ -n $name_fd ]] && name=$(read_fd "$name_fd" 80)
+[[ -n $cwd_fd ]] && cwd=$(read_fd "$cwd_fd" 1024)
 
 sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
 
+# ------------------------------------------------------------- state paths
+
+# A record is at most this large; the reader in Record.qml enforces the same
+# cap, and muster-report refuses to read a larger one back.
+MAX_RECORD_BYTES=65536
+
+# Read an existing record the way Record.qml does: never a symlink, never a
+# special file, never more than the cap. A same-user writer chooses the file's
+# contents and could point the path elsewhere, so the read must not follow a
+# link, wait on a special file, or allocate without bound.
+read_record() {
+  local f="$1" size
+  [[ -f $f && ! -L $f ]] || return 0
+  size=$(stat -c %s -- "$f" 2>/dev/null) || return 0
+  [[ $size =~ ^[0-9]+$ && $size -le $MAX_RECORD_BYTES ]] || return 0
+  dd if="$f" iflag=nofollow,nonblock bs="$MAX_RECORD_BYTES" count=1 status=none 2>/dev/null || true
+}
+
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster/sessions"
-mkdir -p "$state_dir"
+mkdir -p "$state_dir" 2>/dev/null || fail "cannot create $state_dir"
+# Records hold the last prompt, so the directory must be a real directory owned
+# by this user, never a symlink a same-user writer could point at another
+# location. The lock below is taken on this directory, so it has to be checked
+# before it is opened.
+[[ -d $state_dir && ! -L $state_dir && -O $state_dir ]] ||
+  fail "$state_dir is not a directory owned by this user"
 chmod 700 "$state_dir" 2>/dev/null || true
-file="$state_dir/$(sanitize "$agent")-$(sanitize "$session").json"
+
+record_name="$(sanitize "$agent")-$(sanitize "$session").json"
+file="$state_dir/$record_name"
+
+# Open the sessions directory read-only and lock it. There is no predictable
+# lock file to truncate and no symlink to follow, and the opened descriptor is
+# re-checked against the path so a directory swapped in after the checks cannot
+# redirect the lock. -w bounds the wait so one stuck writer cannot block every
+# other integration forever.
+lock_dir() {
+  exec 9<"$state_dir" || fail "cannot open $state_dir"
+  flock -w 5 -x 9 || fail "cannot lock $state_dir"
+  local fd_id path_id
+  fd_id=$(stat -Lc '%d:%i' /proc/self/fd/9 2>/dev/null || true)
+  path_id=$(stat -c '%d:%i' -- "$state_dir" 2>/dev/null || true)
+  [[ -n $fd_id && $fd_id == "$path_id" ]] || fail "$state_dir changed while it was being locked"
+}
 
 if ((remove)); then
+  lock_dir
   rm -f "$file" "$file.lock"
   exit 0
 fi
@@ -148,7 +211,9 @@ fi
 resolve_window() {
   local current="$1" stat chain=() i
   for ((i = 0; i < 16; i++)); do
-    ((current > 1)) || break
+    # Validate before any arithmetic: `(( ))` evaluates its input, so a
+    # non-numeric value must never reach it.
+    [[ $current =~ ^[0-9]+$ && $current -gt 1 ]] || break
     chain+=("$current")
     stat=$(cat "/proc/$current/stat" 2>/dev/null) || break
     current=$(awk '{print $2}' <<<"${stat##*)}")
@@ -201,15 +266,10 @@ esac
 
 # ------------------------------------------------------------ read/modify
 
-exec 9>"$file.lock"
-flock -x 9
+lock_dir
 
-if [[ -f $file ]]; then
-  old=$(<"$file")
-  jq -e . >/dev/null 2>&1 <<<"$old" || old='{}'
-else
-  old='{}'
-fi
+old=$(read_record "$file")
+jq -e . >/dev/null 2>&1 <<<"$old" || old='{}'
 
 now=$(date +%s%3N)
 project=$(basename "${cwd%/}")
@@ -249,9 +309,17 @@ merged=$(jq -c \
     }
   ' <<<"$old")
 
-printf '%s' "$merged" >"$file.tmp"
-chmod 600 "$file.tmp" 2>/dev/null || true
-mv -f "$file.tmp" "$file"
+# Stage in a fresh mktemp file, then write it with O_NOFOLLOW: the exclusive
+# create refuses an existing path, including a symlink, and the random suffix
+# cannot be predicted, so a same-user writer cannot redirect the write at
+# another file. The rename publishes atomically.
+staging=$(mktemp "$state_dir/.muster.XXXXXXXX") ||
+  fail "cannot create a staging file in $state_dir"
+trap 'rm -f "$staging"' EXIT
+printf '%s' "$merged" | dd of="$staging" oflag=nofollow status=none 2>/dev/null ||
+  fail "cannot write the staging file"
+chmod 600 "$staging" 2>/dev/null || true
+mv -f "$staging" "$file"
 
 ((print_json)) && printf '%s\n' "$merged"
 exit 0

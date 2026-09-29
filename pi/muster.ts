@@ -20,7 +20,8 @@
 // the watcher does not have to catch a working→idle transition mid-scan.
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -47,6 +48,13 @@ function privateStateDir() {
 		chmodSync(dir, 0o700);
 	} catch {
 		// Best effort: a failed repair must never break the agent loop.
+	}
+	// A record holds the last prompt, and the directory is written by same-user
+	// integrations: it must be a real directory owned by this user, never a
+	// symlink a writer could point at another location.
+	const info = lstatSync(dir);
+	if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid()) {
+		throw new Error("muster state path is not a directory owned by this user");
 	}
 	return dir;
 }
@@ -198,9 +206,15 @@ let heartbeat = null;
 
 function writeRecord() {
 	if (!recordFile || !record) return;
+	// Stage in an exclusive, unpredictable temp file: the `wx` flag is
+	// O_CREAT|O_EXCL and refuses an existing path, including a symlink, while
+	// the random suffix cannot be predicted and pre-created. The previous
+	// `${recordFile}.tmp` was a predictable name opened with the default `w`
+	// flag, which follows a symlink and can truncate another file. The rename
+	// publishes the record atomically.
+	const tmp = `${recordFile}.${randomBytes(8).toString("hex")}.tmp`;
 	try {
-		const tmp = `${recordFile}.tmp`;
-		writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
+		writeFileSync(tmp, JSON.stringify(record), { mode: 0o600, flag: "wx" });
 		try {
 			chmodSync(tmp, 0o600);
 		} catch {
@@ -208,7 +222,13 @@ function writeRecord() {
 		}
 		renameSync(tmp, recordFile);
 	} catch {
-		// A failed status write must never break the agent loop.
+		// A failed status write must never break the agent loop, and it must not
+		// leave a staging file behind.
+		try {
+			rmSync(tmp, { force: true });
+		} catch {
+			// Nothing more to do.
+		}
 	}
 }
 

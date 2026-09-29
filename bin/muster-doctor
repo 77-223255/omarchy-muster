@@ -84,7 +84,9 @@ have mkdir "creating the sessions directory"
 have dd "reading a record without following a symlink or blocking on a special file"
 have inotifywait "showing a new session at once instead of on the next scan" optional
 
-if [[ -d $state_dir ]]; then
+if [[ -L $state_dir ]]; then
+  record missing "sessions dir type" "$state_dir is a symlink; the writer refuses it"
+elif [[ -d $state_dir ]]; then
   record ok "sessions dir" "$state_dir ($(find "$state_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l) record(s))"
   # A record carries the last user prompt and the working directory, so a
   # group/other-readable directory or record is a leak, not a style nit.

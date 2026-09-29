@@ -123,7 +123,15 @@ read them, and `muster-doctor` reports the modes if you want to check. The
 writer never passes that text as a command-line argument, where any local
 process could read it from `/proc/<pid>/cmdline`: `bin/muster-report` takes the
 prompt on a file descriptor (`--prompt-fd`) and hands it to `jq` as a private
-file, never as `--arg`.
+file, never as `--arg`. `--name-fd` and `--cwd-fd` exist for the same reason;
+the plain `--name` and `--cwd` forms are argv-visible. Every field is capped
+(prompt/message 240 characters, name 80, cwd 1024) so one record can never
+exceed the 64 KiB the reader accepts, and `--pid` must be a number because it
+reaches bash arithmetic. It also refuses a `sessions/` path that is not a real
+directory owned by you, locks that directory read-only instead of a predictable
+lock file, and stages each record in an exclusive `mktemp` file written with
+`O_NOFOLLOW` before the atomic rename — so a same-user writer cannot plant a
+symlink and redirect a write at another file.
 
 The reader treats a record as untrusted: it refuses to follow a symlink,
 refuses anything that is not a plain file, and reads at most 64 KiB, so a
@@ -244,7 +252,7 @@ given). Adding an agent is one line in the `AGENTS` table at the top of
 report=~/.config/omarchy/plugins/shienze.muster/bin/muster-report
 
 printf '%s' "$PROMPT" | $report --agent claude --session "$SESSION_ID" \
-        --state working --name "Refactor auth" --cwd "$PWD" --prompt-fd 0
+        --state working --name "Refactor auth" --prompt-fd 0
 printf '%s' "approve" | $report --agent claude --session "$SESSION_ID" \
         --state blocked --message-fd 0
 $report --agent claude --session "$SESSION_ID" --state idle --completed  # chime + popup
@@ -254,7 +262,9 @@ $report --agent claude --session "$SESSION_ID" --remove
 The prompt and the blocked detail go in on a file descriptor
 (`--prompt-fd` / `--message-fd`), never as arguments — a command line is
 world-readable through `/proc/<pid>/cmdline` while the process runs. `0` is
-stdin; any other descriptor works too.
+stdin; any other descriptor works too. The working directory defaults to the
+caller's `$PWD`, so `--cwd` is not needed; `--name-fd` and `--cwd-fd` cover
+values you would rather not put on the command line at all.
 
 It resolves the terminal window from `--pid` (default `$PPID`) through the
 Hyprland client list, so the notification's click focuses the right terminal

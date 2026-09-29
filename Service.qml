@@ -129,11 +129,21 @@ Item {
     id: mkdirProcess
     running: false
     // Session records hold the last user prompt and the working directory, so
-    // the directory must stay owner-only. umask covers a fresh creation; the
-    // chmod repairs one an earlier version left world-readable.
-    command: ["bash", "-c", "umask 077; mkdir -p -- \"$1\"; chmod 700 -- \"$1\" 2>/dev/null || true", "muster-mkdir", root.stateDir]
-    // Only watch the directory once it exists.
-    onExited: inotifyProbe.running = true
+    // the directory must stay owner-only, and it must be a real directory
+    // owned by this user — never a symlink a same-user writer could point at
+    // another location. mkdir/chmod follow a symlinked path, so the parent and
+    // the sessions directory are both checked before they are touched. umask
+    // covers a fresh creation; the chmod repairs one an earlier version left
+    // world-readable.
+    command: ["bash", "-c",
+      "set -u; d=\"$1\"; p=$(dirname -- \"$d\"); " +
+      "[ ! -L \"$p\" ] || { echo \"muster: $p is a symlink; refusing\" >&2; exit 1; }; " +
+      "umask 077; mkdir -p -- \"$d\" || exit 1; " +
+      "[ ! -L \"$d\" ] && [ -d \"$d\" ] && [ -O \"$d\" ] || { echo \"muster: $d is not a directory owned by this user\" >&2; exit 1; }; " +
+      "chmod 700 -- \"$d\" 2>/dev/null || true",
+      "muster-mkdir", root.stateDir]
+    // Only watch the directory once it exists and belongs to us.
+    onExited: function(exitCode) { if (exitCode === 0) inotifyProbe.running = true }
   }
 
   Process {
@@ -182,7 +192,14 @@ Item {
   Process {
     id: listProcess
     running: false
-    command: ["find", root.stateDir, "-maxdepth", "1", "-type", "f", "-name", "*.json", "-printf", "%p\n"]
+    // `! -name` with a literal newline drops a file name that would otherwise
+    // split into a second path, `head` caps the listing so a writer cannot make
+    // the shell watch an unbounded number of records, and the mtime lets the
+    // scan reload only records that changed instead of spawning a reader per
+    // record on every tick.
+    command: ["bash", "-c",
+      "find \"$1\" -maxdepth 1 -type f -name '*.json' ! -name $'*\\n*' -printf '%p\\t%T@\\n' 2>/dev/null | head -n 256",
+      "muster-list", root.stateDir]
 
     stdout: StdioCollector {
       waitForEnd: true
@@ -190,27 +207,42 @@ Item {
     }
   }
 
+  // path -> mtime from the last listing, so an unchanged record is not read
+  // again on a plain scan tick.
+  property var _mtimes: ({})
+
   function applyListing(output) {
+    var prefix = String(root.stateDir) + "/"
     var paths = []
+    var mtimes = {}
     var lines = String(output || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
-      var path = lines[i].trim()
-      if (path !== "") paths.push(path)
+      var line = lines[i]
+      if (line === "") continue
+      // The mtime is last, so the tab before it is the separator even when the
+      // file name itself contains a tab.
+      var cut = line.lastIndexOf("\t")
+      if (cut <= 0) continue
+      var path = line.slice(0, cut)
+      // Reject a split fragment (a file name containing a newline) and
+      // anything that is not a record under the sessions directory.
+      if (path.indexOf(prefix) !== 0 || path.slice(-5) !== ".json") continue
+      paths.push(path)
+      mtimes[path] = line.slice(cut + 1)
     }
     paths.sort()
-    // Same list, same watchers: reassigning would tear down every Record
-    // just to build identical ones.
-    if (JSON.stringify(paths) !== JSON.stringify(recordPaths)) recordPaths = paths
-    // The directory watch only reports create, delete and rename, and a writer
-    // may also rewrite a record in place. Re-reading every record on the scan
-    // tick keeps those changes visible; one record is a single capped read.
-    root.forceReload()
-  }
 
-  function forceReload() {
-    for (var i = 0; i < recordInstantiator.count; i++) {
-      var watcher = recordInstantiator.objectAt(i)
-      if (watcher) watcher.reloadToken++
+    var previous = root._mtimes
+    var pathsChanged = JSON.stringify(paths) !== JSON.stringify(root.recordPaths)
+    root._mtimes = mtimes
+    if (pathsChanged) recordPaths = paths
+    // A new path is read when its Record mounts, so only an existing record
+    // whose mtime moved needs an explicit reload.
+    for (var j = 0; j < recordInstantiator.count; j++) {
+      var watcher = recordInstantiator.objectAt(j)
+      if (!watcher) continue
+      var current = String(watcher.path || "")
+      if (current !== "" && previous[current] !== mtimes[current]) watcher.reloadToken++
     }
   }
 
@@ -325,7 +357,7 @@ Item {
   function focusCommand(address, pane) {
     var steps = []
     if (/^[A-Za-z0-9:_.-]+$/.test(String(pane || "")))
-      steps.push('herdr agent focus "$2" >/dev/null 2>&1 || true')
+      steps.push('herdr agent focus -- "$2" >/dev/null 2>&1 || true')
     if (/^0x[0-9a-fA-F]+$/.test(String(address || "")))
       steps.push('hyprctl dispatch "hl.dsp.focus({ window = \\"address:$1\\" })" || hyprctl dispatch focuswindow "address:$1"')
     if (steps.length === 0) return null
