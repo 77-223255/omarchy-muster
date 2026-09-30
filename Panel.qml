@@ -89,8 +89,20 @@ Panel {
   // the shell facade, the way every shell widget persists a setting.
   function persist(newSettings) {
     var entry = { id: root.moduleName }
-    for (var k in root.settings) if (k !== "id") entry[k] = root.settings[k]
-    for (var key in newSettings) entry[key] = newSettings[key]
+    // Own, safe keys only. Settings come from shell.json, which is
+    // user-editable, and JSON.parse can give an object its own __proto__ key;
+    // assigning that one would hit the prototype setter instead of storing a
+    // field, and constructors are not settings either.
+    function dangerous(k) {
+      return k === "__proto__" || k === "constructor" || k === "prototype"
+    }
+    function own(obj, k) {
+      return Object.prototype.hasOwnProperty.call(obj, k)
+    }
+    for (var k in root.settings)
+      if (k !== "id" && !dangerous(k) && own(root.settings, k)) entry[k] = root.settings[k]
+    for (var key in newSettings)
+      if (!dangerous(key) && own(newSettings, key)) entry[key] = newSettings[key]
 
     root.settings = entry
     if (root.hostWidget && "settings" in root.hostWidget) root.hostWidget.settings = entry

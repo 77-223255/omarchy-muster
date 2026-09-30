@@ -35,8 +35,9 @@
 ## 状态是怎么来的
 
 **只认记录(records)。** agent 每个会话写一个小 JSON 文件,插件只监听那个目录。
-没有窗口标题抓取、没有进程扫描、没有规则引擎 —— 没有任何会猜错状态、或者悄悄
-失效的东西。自带的 pi 桥接上报精确的 `working` / `blocked` / `idle`,外加一个
+状态从不来自窗口标题或进程列表,也没有规则引擎 —— 没有任何会猜错状态、或者悄悄
+失效的东西。(写记录时会沿父进程链查一次窗口 id,但那只是为了让点击能聚焦到
+正确的终端,从不参与判断状态。)自带的 pi 桥接上报精确的 `working` / `blocked` / `idle`,外加一个
 `completedRuns` 计数器,让"刚跑完一次"不可能被漏掉。
 
 所以接入别的 agent 同样是精确的:写记录即可,见下面的「接入其它 agent」。
@@ -97,22 +98,34 @@ rm -f ~/.config/omarchy/plugins/shienze.muster
 rm -rf ~/Projects/omarchy-muster
 ```
 
-除了 `~/.config/omarchy/`、`~/.local/state/omarchy/muster/` 和那个 pi 桥接软链,
-它不碰任何文件;也不会在你不知情的情况下覆盖用户配置(改设置只有你在面板里点)。
+除了 `~/.config/omarchy/` 和 state home,它不写任何文件;也不会在你不知情的情况下
+覆盖用户配置(改设置只有你在面板里点)。state home 是 `$XDG_STATE_HOME`(默认
+`~/.local/state`),插件在其中创建 `omarchy/muster/sessions` 与 `omarchy/muster/marks`
+——如果 `omarchy` 或 `~/.local/state` 还不存在也会一并创建。卸载插件不会删除这些状态,
+上面的卸载步骤会。(完成提醒还会让 omarchy 自己的通知服务弹一条 toast,而那个服务把
+自己的日志留在 `~/.local/state/omarchy/notifications/`;本插件不会把会话内容发过去。)
 
 **隐私。** record 里包含最后一条用户 prompt 和工作目录。这些状态只留在本机,
 不会离开这台机器。`sessions/` 目录及其中的 record 都以仅属主可读的权限创建
 (`0700` / `0600`),其他本地用户读不到;想核对权限可以运行 `muster-doctor`。
-写入端也不会把这段文本当作命令行参数——进程的命令行在运行期间对任何本地用户
-都是可读的(`/proc/<pid>/cmdline`);`bin/muster-report` 把 prompt 从文件描述符
-(`--prompt-fd`)读进来,并以私有文件交给 `jq`,不用 `--arg`。`--name-fd` 和
-`--cwd-fd` 出于同样的理由存在;直接传 `--name`/`--cwd` 会出现在 argv 里。每个
-字段都有上限(prompt/message 240 字符、name 80、cwd 1024),所以一条 record
-不会超过读取端接受的 64 KiB;`--pid` 必须是数字,因为它会进入 bash 算术。它还会
-拒绝一个不是“由你拥有的真实目录”的 `sessions/` 路径,以只读方式锁住该目录(而不是
-一个可预测的锁文件),并把每条 record 暂存在独占创建的 `mktemp` 文件里、以
-`O_NOFOLLOW` 写入后再原子改名——同用户的写入者无法通过预埋软链接把写入重定向到
-另一个文件。
+写入端也不会把任何用户文本当作命令行参数——进程的命令行在运行期间对任何本地用户
+都是可读的(`/proc/<pid>/cmdline`)。`bin/muster-report` 把 prompt、blocked 详情、
+name 和工作目录都从文件描述符读进来(`--prompt-fd`、`--message-fd`、`--name-fd`、
+`--cwd-fd`),再用 `jq --rawfile` 交出去:命令行里只会出现 `/dev/fd/N`,不会出现值
+本身。没有 `--name` / `--cwd` / `--prompt` / `--message` 这种退路,它们会直接被
+拒绝。凡是会进入命令行参数的值都被限制成携带不了文本的形状:`--agent` 和
+`--session` 用来决定 record 文件名,限制在纯 id 字符集(`[A-Za-z0-9._-]`);
+`--pid` 必须是数字(它会进入 bash 算术);`--window` 只能是 `auto`/`none`/十六进制
+地址;`--state` 只能是四个状态词;`--herdr-pane` 最多 64 字符。
+路径也按同样标准 vetting:本插件在 state home 之下创建的每一个组件都必须是由你
+拥有的真实目录,所以别人在 `…/omarchy/muster` 埋一个软链接无法把 sessions 目录
+整体搬到别处。写入端以只读方式锁住该目录(而不是使用可预测的锁文件),并把每条
+record 由同一次打开独占创建并写入(`O_EXCL`)之后再原子改名——
+同用户的写入者无法通过预埋软链接把写入重定向到另一个文件;shell 侧的 mark SVG
+也是同样的写法。每个字段都有上限(prompt/message 240 字符、name 80、cwd 1024),
+所以一条 record 不会超过读取端接受的 64 KiB;相邻的 mark SVG 也是这样写入:
+逐层进入目录并在进入后重新校验,才暂存与发布。被 kill 的 agent 留下的 record
+会在下次 shell 启动时(超过一周后)被清除,被中断写入留下的暂存文件一小时后清除。
 
 读取端不信任 record:它拒绝跟随符号链接、拒绝任何非普通文件,并且每次最多
 只读 64 KiB。因此一个 agent 写下的 record 既不能让 shell 转去读别的文件,
@@ -172,12 +185,13 @@ omarchy-shell shienze.muster status | jq '.details[]'
 |-------|-------|
 | `schemaVersion` | `1` |
 | `agent` | 必填;任何 id 都行,omarchy 自己的别名(`claude-code`、`oh-my-pi`、`cursor`…)会归并到规范 id |
-| `sessionId`、`name`、`cwd`、`project` | 身份与显示;`project` 默认取 `cwd` 的最后一段 |
+| `sessionId`、`name`、`cwd`、`project` | 身份与显示;`project` 默认取 `cwd` 的最后一段;各字段有上限(name 80、cwd 1024、project 256、prompt/message 240) |
 | `state` | `working` \| `blocked` \| `idle` \| `unknown` |
 | `message` | `blocked` 时显示 |
 | `lastPrompt` | 显示在卡片上 |
 | `pid` | 归属进程;也是去重依据(同 pid 的多条只留最新) |
 | `windowAddress` | Hyprland 窗口地址;让通知被点击时能聚焦那个终端 |
+| `herdrPane` | herdr pane id;点击时切到那个 pane(最多 64 字符) |
 | `updatedAt` | 毫秒时间戳;决定过期(`staleAfterSec`) |
 | `completedRuns` | **提醒的触发器** —— 每完成一次运行就 +1 |
 | `seq` | 单调递增的写入计数,用来在两条同 pid 记录里挑最新的 |
@@ -223,17 +237,18 @@ omarchy-shell shienze.muster status | jq '.details[]'
 report=~/.config/omarchy/plugins/shienze.muster/bin/muster-report
 
 printf '%s' "$PROMPT" | $report --agent claude --session "$SESSION_ID" \
-        --state working --name "Refactor auth" --prompt-fd 0
+        --state working --name-fd 3 --prompt-fd 0 3<<<"$TITLE"
 printf '%s' "approve" | $report --agent claude --session "$SESSION_ID" \
         --state blocked --message-fd 0
 $report --agent claude --session "$SESSION_ID" --state idle --completed  # 响一声 + 弹窗
 $report --agent claude --session "$SESSION_ID" --remove
 ```
 
-prompt 和 blocked 详情从文件描述符传入(`--prompt-fd` / `--message-fd`),不走参数
-—— 进程命令行在运行期间对本地用户可读(`/proc/<pid>/cmdline`)。`0` 就是 stdin,
-其他描述符也行。工作目录默认就是调用者的 `$PWD`,不需要 `--cwd`;`--name-fd` 和
-`--cwd-fd` 用来传入你不想放到命令行上的值。
+所有原本要打字的参数都从文件描述符传入——`--prompt-fd`、`--message-fd`、
+`--name-fd`、`--cwd-fd`,不走参数:进程命令行在运行期间对本地用户可读
+(`/proc/<pid>/cmdline`)。`0` 就是 stdin,其他描述符也行,here-string
+(`3<<<"$TITLE"`)是最短写法。工作目录默认就是调用者的 `$PWD`,只有当 agent 运行在
+别处时才需要 `--cwd-fd`。
 
 它会用 `--pid`(默认 `$PPID`)沿进程链在 Hyprland 窗口列表里找到你所在的终端,
 所以"点通知聚焦终端"不需要额外配置。在 herdr 里,pane 的进程祖先没有窗口
@@ -271,14 +286,14 @@ prompt 和 blocked 详情从文件描述符传入(`--prompt-fd` / `--message-fd`
 
 | 部分 | 语言 | 依赖 |
 |-------|----------|-----------|
-| `Service.qml`、`BarWidget.qml`、`Panel.qml`、`Record.qml` | QML | omarchy shell(Quickshell、Qt 6)、`hyprctl`、`find`、`mkdir`、`inotifywait`(可选) |
+| `Service.qml`、`BarWidget.qml`、`Panel.qml`、`Record.qml` | QML | omarchy shell(Quickshell、Qt 6)、`bash`、`find`、`sort`、`head`、`stat`、`dd`、`mkdir`、`chmod`、`timeout`、`hyprctl`、`head`、`od`、`inotifywait`(可选) |
 | `Model.js` | JavaScript(QML 引擎) | 无 |
 | `pi/muster.ts` | TypeScript | pi 自带的 Bun 运行时;只用 node 内置模块,零 npm 依赖 |
-| `bin/muster-report` | Bash | `jq`、`flock`、`hyprctl` |
+| `bin/muster-report` | Bash | `jq`、`flock`、`stat`、`dd`、`mv`、`chmod`、`tr`、`cut`、`date`、`wc`、`awk`、`cat`、`head`、`od`、`rm`、`hyprctl` |
 | 提醒 | — | `paplay`(或 `pw-play`/`mpv`)和 `omarchy-notification-send` |
 
-`bin/muster-doctor` 会把上面每一条都查一遍(`--json` 给机器读),只有必需项缺失
-时才以非 0 退出。
+`bin/muster-doctor` 会把上面这些查一遍(`--json` 给机器读),必需项缺失时以非 0
+退出。没链接 pi 桥接只算"可选",不算缺失 —— 桥接只有用 pi 才需要。
 
 用 Rust 在这里没有收益:它既当不了 Quickshell 插件,也当不了 pi 扩展,编译型组件
 只能是"一个带 socket 的独立守护进程"(正是本插件要避免的重东西),或者替换掉一个

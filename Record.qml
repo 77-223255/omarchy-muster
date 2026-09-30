@@ -32,7 +32,7 @@ Item {
     "[ -f \"$file\" ] && [ ! -L \"$file\" ] || exit 0",
     "size=$(stat -c %s -- \"$file\" 2>/dev/null) || exit 0",
     "[ \"$size\" -le \"$cap\" ] || exit 0",
-    "exec dd if=\"$file\" iflag=nofollow,nonblock bs=\"$cap\" count=1 status=none 2>/dev/null"
+    "exec timeout -k 2 5 dd if=\"$file\" iflag=nofollow,nonblock bs=\"$cap\" count=1 status=none 2>/dev/null"
   ].join("\n")
 
   function parse(content) {
@@ -62,13 +62,30 @@ Item {
 
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.parse(text)
+      onStreamFinished: {
+        root.parse(text)
+        if (root.pending && !reader.running) {
+          root.pending = false
+          root.read()
+        }
+      }
     }
   }
 
+  property bool pending: false
+
+  // A reload that arrives while a read is in flight is remembered, not dropped:
+  // this reader is the only thing that re-reads a rewritten record, so a
+  // dropped reload would leave the card stale until the next mtime change.
   function read() {
-    if (root.path !== "") reader.running = true
+    if (root.path === "") return
+    if (reader.running) {
+      root.pending = true
+      return
+    }
+    reader.running = true
   }
+
 
   onPathChanged: root.read()
   onReloadTokenChanged: root.read()

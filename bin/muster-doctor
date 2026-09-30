@@ -15,7 +15,9 @@ json=0
 [[ ${1:-} == "--json" ]] && json=1
 
 plugin_dir=${MUSTER_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/shienze.muster}
-state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster/sessions
+state_base=${XDG_STATE_HOME:-$HOME/.local/state}
+state_dir="$state_base/omarchy/muster/sessions"
+marks_dir="$state_base/omarchy/muster/marks"
 pi_extension=$HOME/.pi/agent/extensions/muster.ts
 
 ok=0
@@ -23,9 +25,16 @@ missing=0
 optional=0
 rows=()
 
+# Anything printed may derive from a record another integration wrote, so it is
+# stripped of control bytes first: a terminal executes ANSI/OSC sequences, and a
+# record's project name can carry them.
+clean() {
+  printf '%s' "$1" | tr -d '\000-\037\177-\237'
+}
+
 record() {
   # record <status> <name> <detail>
-  rows+=("$1|$2|$3")
+  rows+=("$1|$2|$(clean "$3")")
   case $1 in
   ok) ok=$((ok + 1)) ;;
   missing) missing=$((missing + 1)) ;;
@@ -87,16 +96,28 @@ have inotifywait "showing a new session at once instead of on the next scan" opt
 if [[ -L $state_dir ]]; then
   record missing "sessions dir type" "$state_dir is a symlink; the writer refuses it"
 elif [[ -d $state_dir ]]; then
-  record ok "sessions dir" "$state_dir ($(find "$state_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l) record(s))"
+  record ok "sessions dir" "$state_dir ($(find -- "$state_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l) record(s))"
+  # mkdir and every later open follow a symlinked component, so a link at any
+  # level moves the whole directory out of the state home. The writers refuse
+  # such a path, which means no record is written at all.
+  linked=""
+  for c in omarchy omarchy/muster omarchy/muster/sessions; do
+    [[ -L $state_base/$c ]] && linked="$state_base/$c"
+  done
+  if [[ -n $linked ]]; then
+    record missing "state path" "$linked is a symlink; the writers refuse it"
+  else
+    record ok "state path" "no symlinked component under $state_base/omarchy"
+  fi
   # A record carries the last user prompt and the working directory, so a
   # group/other-readable directory or record is a leak, not a style nit.
-  dir_mode=$(stat -c '%a' "$state_dir" 2>/dev/null || echo unknown)
-  if find "$state_dir" -maxdepth 0 -perm /077 -print -quit 2>/dev/null | grep -q .; then
+  dir_mode=$(stat -c '%a' -- "$state_dir" 2>/dev/null || echo unknown)
+  if find -- "$state_dir" -maxdepth 0 -perm /077 -print -quit 2>/dev/null | grep -q .; then
     record missing "sessions dir mode" "$dir_mode — records hold prompts; run: chmod 700 $state_dir"
   else
     record ok "sessions dir mode" "$dir_mode (owner-only)"
   fi
-  open_records=$(find "$state_dir" -maxdepth 1 -name '*.json' -perm /077 2>/dev/null | wc -l)
+  open_records=$(find -- "$state_dir" -maxdepth 1 -name '*.json' -perm /077 2>/dev/null | wc -l)
   if ((open_records > 0)); then
     record missing "record mode" "$open_records record(s) group/other-readable; run: chmod 600 $state_dir/*.json"
   else
@@ -104,13 +125,19 @@ elif [[ -d $state_dir ]]; then
   fi
   # The reader refuses a symlink, a special file and an oversized record, so a
   # bad one is a silent missing session; surface it instead.
-  bad_type=$(find "$state_dir" -maxdepth 1 -name '*.json' ! -type f 2>/dev/null | wc -l)
+  bad_type=$(find -- "$state_dir" -maxdepth 1 -name '*.json' ! -type f 2>/dev/null | wc -l)
   if ((bad_type > 0)); then
     record missing "record type" "$bad_type record(s) are not plain files; the reader refuses them"
   else
     record ok "record type" "records are plain files"
   fi
-  oversized=$(find "$state_dir" -maxdepth 1 -name '*.json' -type f -size +64k 2>/dev/null | wc -l)
+  linked_records=$(find -- "$state_dir" -maxdepth 1 -name '*.json' -type l 2>/dev/null | wc -l)
+  if ((linked_records > 0)); then
+    record missing "record symlink" "$linked_records record(s) are symlinks; the reader refuses them"
+  else
+    record ok "record symlink" "no record is a symlink"
+  fi
+  oversized=$(find -- "$state_dir" -maxdepth 1 -name '*.json' -type f -size +64k 2>/dev/null | wc -l)
   if ((oversized > 0)); then
     record missing "record size" "$oversized record(s) over 64 KiB; the reader refuses them"
   else
@@ -120,27 +147,48 @@ else
   record optional "sessions dir" "$state_dir (created on first write)"
 fi
 
+# The marks are generated SVGs with no session data, so they stay readable —
+# but the directory they are written into must still be a real directory owned
+# by this user, or the shell would follow a link a same-user writer left there.
+if [[ -L $marks_dir ]]; then
+  record missing "marks dir" "$marks_dir is a symlink; the shell refuses to write marks"
+elif [[ -d $marks_dir ]]; then
+  if [[ -O $marks_dir ]]; then
+    record ok "marks dir" "$marks_dir ($(find -- "$marks_dir" -maxdepth 1 -name '*.svg' 2>/dev/null | wc -l) mark(s))"
+  else
+    record missing "marks dir" "$marks_dir is not owned by this user"
+  fi
+else
+  record optional "marks dir" "$marks_dir (created on first write)"
+fi
+
 # -------------------------------------------------------------- writers
 
 if [[ -L $pi_extension || -f $pi_extension ]]; then
   if [[ -f $pi_extension ]]; then
-    record ok "pi bridge" "$(readlink -f "$pi_extension")"
+    record ok "pi bridge" "$(readlink -f -- "$pi_extension")"
   else
     record missing "pi bridge" "$pi_extension is a dangling symlink"
   fi
 else
-  record missing "pi bridge" "link pi/muster.ts into $HOME/.pi/agent/extensions/"
+  record optional "pi bridge" "link pi/muster.ts into $HOME/.pi/agent/extensions/ (only needed for pi)"
 fi
 
-have jq "muster-report writes records with it"
-have flock "muster-report serializes concurrent writers"
+for tool in bash jq flock stat dd mv chmod tr cut date wc awk cat rm head od; do
+  have "$tool" "muster-report writes records with it"
+done
+for tool in timeout sort head; do
+  have "$tool" "the shell bounds its scans with it"
+done
 
 # --------------------------------------------------------------- alerts
 
-if command -v paplay >/dev/null 2>&1 || command -v pw-play >/dev/null 2>&1 || command -v mpv >/dev/null 2>&1; then
-  record ok "audio player" "$(command -v paplay || command -v pw-play || command -v mpv)"
+# paplay is what the shipped widget calls (soundPlayer in Service.qml); the
+# others only help if the user edits that line, so they are not a pass.
+if command -v paplay >/dev/null 2>&1; then
+  record ok "audio player" "$(command -v paplay)"
 else
-  record missing "audio player" "install pipewire (paplay/pw-play) or mpv for the completion sound"
+  record missing "audio player" "the completion sound calls paplay; install pipewire-pulse"
 fi
 
 sound_file=/usr/share/sounds/freedesktop/stereo/complete.oga

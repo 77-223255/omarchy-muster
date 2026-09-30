@@ -49,8 +49,9 @@ alerts; the marketplace card itself still reads only `preview.png`.
 - [x] Root license file (`LICENSE`, MIT) and documented external dependencies
 - [x] Plugin id outside the reserved `omarchy.*` namespace and unique in the
       registry (`shienze.muster` — checked against `registry.json`)
-- [x] Repository is clean of binaries, downloads, and `/tmp` runtime state, so
-      the automated security baseline has nothing to flag
+- [x] Repository has no compiled artifacts or downloaded payloads (only the
+      plugin sources, a license, docs and PNG screenshots) and no `/tmp` runtime
+      state, so the automated security baseline has nothing to flag
 - [x] Root `preview.png`
 - [x] `assets/panel.png`, `assets/chip.png` and `assets/notification.png`
 

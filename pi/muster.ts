@@ -29,34 +29,112 @@ const AGENT = "pi";
 const SCHEMA_VERSION = 1;
 const HEARTBEAT_MS = 30000;
 
-function stateDir() {
-	const base =
-		process.env.XDG_STATE_HOME && process.env.XDG_STATE_HOME.length > 0
-			? process.env.XDG_STATE_HOME
-			: join(homedir(), ".local", "state");
-	return join(base, "omarchy", "muster", "sessions");
+function stateBase() {
+	const configured = String(process.env.XDG_STATE_HOME || "");
+	// All slashes collapse to one: stripping them would leave "" or "//".
+	if (/^\/+$/.test(configured)) return "/";
+	if (configured.startsWith("/")) return configured.replace(/\/+$/, "");
+	// XDG paths are absolute by definition. A relative one would put the state
+	// directory wherever the agent's cwd happens to be, and one starting with
+	// "-" would be read as an option by a tool that takes the path. The home
+	// fallback is checked the same way, and join() must never see an empty
+	// string: join("", ".local", "state") is ".local/state", a *relative* path,
+	// which is how this ended up writing a prompt-bearing record under the
+	// agent's cwd. With no absolute home the path names a directory that cannot
+	// be created, and the write fails instead of landing somewhere unintended.
+	const home = homedir();
+	return home.startsWith("/") ? join(home, ".local", "state") : "/nonexistent-home/.local/state";
 }
 
-// A record carries the last user prompt and the working directory, so the
-// directory and every record must stay owner-only. mkdirSync's mode only
-// applies at creation and is filtered through the process umask; the explicit
-// chmods also repair a path an earlier version left at 0755/0644.
-function privateStateDir() {
-	const dir = stateDir();
-	mkdirSync(dir, { recursive: true, mode: 0o700 });
+function stateDir() {
+	return join(stateBase(), "omarchy", "muster", "sessions");
+}
+
+// Every component this plugin creates under the state home must be a real
+// directory owned by this user. mkdirSync({recursive:true}) and every later
+// open follow a symlinked component, so a same-user writer that drops a link at
+// …/omarchy/muster would move the whole sessions directory — records included
+// — out of the state home. One level is created at a time and re-checked, so an
+// existing directory is never reached through a link. The state home itself is
+// left alone: a user who symlinks XDG_STATE_HOME into a dotfiles repo did that
+// on purpose.
+// The leaf directory (dev:inode) captured when the state path was vetted. Every
+// write re-checks it, because the vetting happens once at session start while
+// the heartbeat keeps writing for as long as the session lives: a directory
+// renamed or replaced in between would otherwise receive the prompt without a
+// single check noticing.
+let stateDirIdentity = "";
+
+function identityOf(path) {
 	try {
-		chmodSync(dir, 0o700);
+		const info = lstatSync(path, { bigint: true });
+		return `${info.dev}:${info.ino}`;
 	} catch {
-		// Best effort: a failed repair must never break the agent loop.
+		return "";
 	}
-	// A record holds the last prompt, and the directory is written by same-user
-	// integrations: it must be a real directory owned by this user, never a
-	// symlink a writer could point at another location.
-	const info = lstatSync(dir);
-	if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid()) {
-		throw new Error("muster state path is not a directory owned by this user");
+}
+
+function stateDirIsPinned() {
+	return stateDirIdentity !== "" && identityOf(stateDir()) === stateDirIdentity;
+}
+
+function privateStateDir() {
+	// The state home itself is only created when missing, never vetted: a user
+	// who symlinks XDG_STATE_HOME into a dotfiles repo did that on purpose.
+	const base = stateBase();
+	if (!lstatSafe(base)) mkdirSync(base, { recursive: true, mode: 0o700 });
+	let current = base;
+	const parts = ["omarchy", "muster", "sessions"];
+	for (const [index, part] of parts.entries()) {
+		current = join(current, part);
+		const leaf = index === parts.length - 1;
+		let info = lstatSafe(current);
+		if (!info) {
+			// 0700 from the start: mkdirSync's mode is filtered through the
+			// process umask, and the chmod below repairs whatever it took off.
+			// The directory can appear between the lstat and the mkdir — another
+			// integration starting at the same moment — and that is not an error;
+			// only a mkdir failure that leaves nothing behind is.
+			try {
+				mkdirSync(current, { mode: 0o700 });
+			} catch (error) {
+				if (error?.code !== "EEXIST") throw error;
+			}
+			info = lstatSync(current);
+		}
+		if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== process.getuid()) {
+			throw new Error(`muster state path is not a directory owned by this user: ${current}`);
+		}
+		// Only the leaf holds records, so only the leaf is forced owner-only.
+		// `omarchy` is shared with every other omarchy plugin's state: tightening
+		// it would change a directory this plugin does not own, and demanding a
+		// mode on it would silently stop the bridge wherever that mode cannot be
+		// set. The intermediate directories only have to be real, owned and not
+		// symlinks, which is what the check above establishes.
+		if (!leaf) continue;
+		try {
+			chmodSync(current, 0o700);
+		} catch {
+			// Best effort; the check below decides whether the result is usable.
+		}
+		// A chmod that silently does nothing — a filesystem that does not enforce
+		// POSIX modes, such as FAT or some FUSE and network mounts — would leave
+		// the prompt readable by every local user. A wrong mode means the record
+		// is not written at all, instead of being leaked quietly.
+		if ((lstatSync(current).mode & 0o777) !== 0o700) {
+			throw new Error(`muster state path is not owner-only: ${current}`);
+		}
+		stateDirIdentity = identityOf(current);
 	}
-	return dir;
+	return current;
+}
+
+function lstatSafe(path) {
+	try {
+		return lstatSync(path);
+	} catch {
+		return null;
+	}
 }
 
 function sanitize(value) {
@@ -64,6 +142,10 @@ function sanitize(value) {
 		.replace(/[^a-zA-Z0-9._-]/g, "_")
 		.slice(0, 80);
 }
+
+// The 64 KiB the reader accepts, enforced on this side too: the record is a
+// fixed small object, and one that the reader would refuse is never written.
+const MAX_RECORD_BYTES = 65536;
 
 function truncate(text, limit) {
 	const value = String(text || "").replace(/\s+/g, " ").trim();
@@ -127,7 +209,9 @@ function activeWindowAddress() {
 function herdrPane() {
 	if (String(process.env.HERDR_ENV || "") !== "1") return "";
 	const pane = String(process.env.HERDR_PANE_ID || "");
-	return /^[A-Za-z0-9:_.-]+$/.test(pane) ? pane : "";
+	// Capped like every other field: an uncapped pane id would push the record
+	// past the 64 KiB the reader accepts and make the session vanish silently.
+	return /^[A-Za-z0-9:_.-]{1,64}$/.test(pane) ? pane : "";
 }
 
 function resolveWindow() {
@@ -206,19 +290,33 @@ let heartbeat = null;
 
 function writeRecord() {
 	if (!recordFile || !record) return;
+	// The directory that was vetted at session start is not necessarily the
+	// directory this write would land in; if it is no longer there, skip the
+	// write rather than publish a prompt somewhere else.
+	if (!stateDirIsPinned()) return;
 	// Stage in an exclusive, unpredictable temp file: the `wx` flag is
 	// O_CREAT|O_EXCL and refuses an existing path, including a symlink, while
 	// the random suffix cannot be predicted and pre-created. The previous
 	// `${recordFile}.tmp` was a predictable name opened with the default `w`
 	// flag, which follows a symlink and can truncate another file. The rename
 	// publishes the record atomically.
+	const payload = JSON.stringify(record);
+	// Every field is capped, so this is a backstop: a record the reader would
+	// refuse is never written in the first place.
+	if (new TextEncoder().encode(payload).length > MAX_RECORD_BYTES) return;
 	const tmp = `${recordFile}.${randomBytes(8).toString("hex")}.tmp`;
 	try {
-		writeFileSync(tmp, JSON.stringify(record), { mode: 0o600, flag: "wx" });
+		writeFileSync(tmp, payload, { mode: 0o600, flag: "wx" });
 		try {
 			chmodSync(tmp, 0o600);
 		} catch {
-			// Best effort; the rename below still publishes the record.
+			// Best effort; the check below decides whether it is publishable.
+		}
+		// The staged record is verified before it is published: a filesystem that
+		// ignores the mode would otherwise put the prompt somewhere other local
+		// users can read.
+		if ((lstatSync(tmp).mode & 0o777) !== 0o600) {
+			throw new Error("muster staging file is not owner-only");
 		}
 		renameSync(tmp, recordFile);
 	} catch {
@@ -256,20 +354,24 @@ function startSession(pi, ctx) {
 
 	let name = "";
 	try {
-		name = String(pi?.getSessionName?.() || "");
+		// Capped like every other writer: a record is a fixed small object, and
+		// the shell re-reads and re-renders it on every scan.
+		name = String(pi?.getSessionName?.() || "").slice(0, 80);
 	} catch {
 		name = "";
 	}
 
-	const cwd = String(ctx?.cwd || process.cwd() || "");
+	// Capped like bin/muster-report: the shell re-reads and re-renders this on
+	// every scan, and a path longer than this is not a path worth showing.
+	const cwd = String(ctx?.cwd || process.cwd() || "").slice(0, 1024);
 	recordFile = join(stateDir(), `${AGENT}-${sanitize(sessionId || process.pid)}.json`);
 	record = {
 		schemaVersion: SCHEMA_VERSION,
 		agent: AGENT,
-		sessionId: sessionId || String(process.pid),
+		sessionId: (sessionId || String(process.pid)).slice(0, 120),
 		name,
 		cwd,
-		project: basename(cwd),
+		project: basename(cwd).slice(0, 256),
 		state: ctx?.isIdle?.() === false ? "working" : "idle",
 		message: "",
 		pid: process.pid,
@@ -338,7 +440,10 @@ export default function (pi) {
 
 	pi.on("session_info_changed", async (event) => {
 		if (!rootSession || !record) return;
-		touch({ name: String(event?.name || "") });
+		// Capped like the name in startSession: an uncapped rename would push the
+		// record past the reader's 64 KiB limit and make the session vanish from
+		// the widget with no diagnostic.
+		touch({ name: String(event?.name || "").slice(0, 80) });
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {

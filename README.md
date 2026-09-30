@@ -36,7 +36,7 @@ desktop notification — without running a terminal multiplexer.
 
 ![The bar chip](assets/chip.png)
 
-![The completion notification](assets/notification.png)
+![The alert (a test alert; a real one names the agent and says "Run finished")](assets/notification.png)
 
 Captures live in [`assets/`](assets/README.md); the marketplace listing card is
 one optional root `preview.png`.
@@ -44,9 +44,11 @@ one optional root `preview.png`.
 ## How it gets state
 
 **Records only.** Agents write one small JSON file per session and the plugin
-watches the directory. There is no window-title scraping, no process scanning,
-no rule engine — nothing that can guess a state wrong or silently stop
-working. The bundled pi bridge reports exact `working` / `blocked` / `idle`,
+watches the directory. The state is never inferred from a window title or a
+process list, and there is no rule engine — nothing that can guess a state
+wrong or silently stop working. (The window id *is* looked up from the parent
+chain when a record is written, but only to make a click focus the right
+terminal; it never decides a session's state.) The bundled pi bridge reports exact `working` / `blocked` / `idle`,
 plus a `completedRuns` counter that makes "a run just finished" unmissable.
 
 Adding an agent is therefore also exact: write records. See
@@ -104,7 +106,9 @@ rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster"
 ```
 
 `omarchy plugin remove` deletes the plugin directory and its entry in
-`~/.config/omarchy/shell.json`, and nothing else. If you installed from a
+`~/.config/omarchy/shell.json`, and nothing else. The notification log under
+`~/.local/state/omarchy/notifications/` is omarchy's own; delete it too if you
+want the toast history gone. If you installed from a
 checkout with the symlink above, delete the symlink and your clone instead:
 
 ```bash
@@ -112,26 +116,53 @@ rm -f ~/.config/omarchy/plugins/shienze.muster
 rm -rf ~/Projects/omarchy-muster
 ```
 
-No file outside `~/.config/omarchy/`, `~/.local/state/omarchy/muster/` and the
-pi bridge symlink is touched, and no user configuration is overwritten without
-you doing it from the panel.
+Nothing outside `~/.config/omarchy/`, the state home and the shell's own log is
+written, and no user configuration is overwritten without you doing it from the
+panel. The state home is `$XDG_STATE_HOME` (or `~/.local/state`), and the plugin
+creates `omarchy/muster/sessions` and `omarchy/muster/marks` under it — plus
+`omarchy` itself and `~/.local/state` if they are not there yet. (A record that
+cannot be parsed is reported once in the shell log, so the shell journal can
+contain that file's name.) Removing the plugin does not remove that state; the
+uninstall step above does. (The
+completion alert also asks omarchy's own notification service to show a toast,
+and that service keeps its own log under `~/.local/state/omarchy/notifications/`;
+the plugin sends it no prompt, message, session name or working directory —
+only the agent's label, a fixed state word, and the window id the click needs.)
 
 **Privacy.** A record includes the last user prompt and the working directory.
 That state never leaves this machine. The `sessions/` directory and its
 records are created owner-only (`0700` / `0600`) so another local user cannot
-read them, and `muster-doctor` reports the modes if you want to check. The
-writer never passes that text as a command-line argument, where any local
-process could read it from `/proc/<pid>/cmdline`: `bin/muster-report` takes the
-prompt on a file descriptor (`--prompt-fd`) and hands it to `jq` as a private
-file, never as `--arg`. `--name-fd` and `--cwd-fd` exist for the same reason;
-the plain `--name` and `--cwd` forms are argv-visible. Every field is capped
-(prompt/message 240 characters, name 80, cwd 1024) so one record can never
-exceed the 64 KiB the reader accepts, and `--pid` must be a number because it
-reaches bash arithmetic. It also refuses a `sessions/` path that is not a real
-directory owned by you, locks that directory read-only instead of a predictable
-lock file, and stages each record in an exclusive `mktemp` file written with
-`O_NOFOLLOW` before the atomic rename — so a same-user writer cannot plant a
-symlink and redirect a write at another file.
+read them, and `muster-doctor` reports the modes if you want to check.
+
+The prompt, the blocked detail, the session name and the working directory
+never travel as a command-line argument, where any local process could read
+them from `/proc/<pid>/cmdline`. `bin/muster-report` takes them on file
+descriptors
+(`--prompt-fd`, `--message-fd`, `--name-fd`, `--cwd-fd`) and hands them to `jq`
+through `--rawfile`, so the values themselves never appear in any process's
+command line — only `/dev/fd/N` does. There is no `--name` / `--cwd` /
+`--prompt` / `--message` option to fall back on: they are refused. Every value
+that reaches a command line is held to a shape that cannot carry text:
+`--agent` and `--session` name the record file and are limited to a plain id
+charset (`[A-Za-z0-9._-]`), `--pid` to digits because it reaches bash
+arithmetic, `--window` to `auto`/`none`/a hex address, `--state` to the four
+state words, and `--herdr-pane` to a 64-character pane id.
+
+The path is vetted the same way: every component under the state home that
+this plugin creates must be a real directory owned by you, so a symlink dropped
+at `…/omarchy/muster` cannot move the sessions directory somewhere else. The
+writer locks that directory read-only instead of taking a predictable lock
+file, and stages each record with an exclusive create written by the same open
+that fills it (`O_EXCL`), before the atomic rename — a same-user writer cannot
+plant a symlink or a hardlink and redirect the write at another file — every record operation addresses
+it through that locked descriptor, so a directory swapped out mid-run is not
+followed. The shell's mark SVGs are written the same way: the directory chain is
+entered and re-checked at each level before anything is staged. Every field is
+capped (prompt/message 240 characters, name 80, cwd 1024, pane 64, project 256)
+and the merged record is measured, so one record can never exceed the 64 KiB the
+reader accepts. A record left behind by a killed agent is deleted a week later
+when the shell next starts; a staging file from an interrupted write goes after
+an hour.
 
 The reader treats a record as untrusted: it refuses to follow a symlink,
 refuses anything that is not a plain file, and reads at most 64 KiB, so a
@@ -181,7 +212,7 @@ live at the top of `Service.qml`:
 |----------|-------|---------|
 | `refreshIntervalSec` | `2` | Fallback rescan cadence; `inotifywait` makes new records appear at once |
 | `staleAfterSec` | `120` | Forget a record whose writer stopped (the bridge heartbeats every 30s) |
-| `debounceMs` | `2000` | Collapse several sessions finishing together into one alert |
+| `debounceMs` | `2000` | One alert per 2s: a completion inside the window is dropped |
 | `soundFile` | freedesktop `complete.oga` | |
 | `soundPlayer` | `paplay` | `pw-play` / `mpv` work too |
 
@@ -214,9 +245,12 @@ once.
 ## The agents omarchy ships
 
 All thirteen agents `omarchy default agent` accepts are known by name, plus the
-aliases that command takes: `claude-code`, `oh-my-pi`, `open-code`, `cursor`,
-`github-copilot`, `gemini-cli`, `muse-code`, … A record written under an alias
-folds into the canonical agent instead of becoming a second one.
+spellings an integration might use for them — `claude-code`, `oh-my-pi`,
+`open-code`, `cursor`, `github-copilot`, `gemini-cli`, `muse-code`, and a few
+that only this plugin folds (`anthropic`, `openai-codex`, `pi-coding-agent`).
+A record written under any of them groups with the canonical agent instead of
+becoming a second one. The `also accepts` column below is the folding, not a
+claim about `omarchy default agent` itself, which takes a smaller set.
 
 The bar chip draws each agent with omarchy's own mark, taken from
 `setup.default.agent.*` in
@@ -242,7 +276,9 @@ Font glyphs, exactly as omarchy's own menu draws them.
 
 Anything else works too and is shown under its own id (no mark until one is
 given). Adding an agent is one line in the `AGENTS` table at the top of
-`Model.js`, carrying omarchy's own codepoint for it.
+`Model.js`, carrying omarchy's own codepoint for it — plus one line in
+`Service.qml`'s `markScript` if you want the completion toast to carry that
+agent's icon too, since the toast icon is a generated SVG named after the id.
 
 ## Adding another agent
 
@@ -252,19 +288,20 @@ given). Adding an agent is one line in the `AGENTS` table at the top of
 report=~/.config/omarchy/plugins/shienze.muster/bin/muster-report
 
 printf '%s' "$PROMPT" | $report --agent claude --session "$SESSION_ID" \
-        --state working --name "Refactor auth" --prompt-fd 0
+        --state working --name-fd 3 --prompt-fd 0 3<<<"$TITLE"
 printf '%s' "approve" | $report --agent claude --session "$SESSION_ID" \
         --state blocked --message-fd 0
 $report --agent claude --session "$SESSION_ID" --state idle --completed  # chime + popup
 $report --agent claude --session "$SESSION_ID" --remove
 ```
 
-The prompt and the blocked detail go in on a file descriptor
-(`--prompt-fd` / `--message-fd`), never as arguments — a command line is
-world-readable through `/proc/<pid>/cmdline` while the process runs. `0` is
-stdin; any other descriptor works too. The working directory defaults to the
-caller's `$PWD`, so `--cwd` is not needed; `--name-fd` and `--cwd-fd` cover
-values you would rather not put on the command line at all.
+Everything you would otherwise type goes in on a file descriptor —
+`--prompt-fd`, `--message-fd`, `--name-fd`, `--cwd-fd` — never as an argument,
+because a command line is world-readable through `/proc/<pid>/cmdline` while
+the process runs. `0` is stdin; any other descriptor works too, and a here-string
+(`3<<<"$TITLE"`) is the shortest way to hand one over. The working directory
+defaults to the caller's `$PWD`, so `--cwd-fd` is only needed when the agent
+runs somewhere else.
 
 It resolves the terminal window from `--pid` (default `$PPID`) through the
 Hyprland client list, so the notification's click focuses the right terminal
@@ -307,14 +344,15 @@ extension must be TypeScript.
 
 | Piece | Language | Depends on |
 |-------|----------|-----------|
-| `Service.qml`, `BarWidget.qml`, `Panel.qml`, `Record.qml` | QML | omarchy shell (Quickshell, Qt 6), `hyprctl`, `find`, `mkdir`, `inotifywait` (optional) |
+| `Service.qml`, `BarWidget.qml`, `Panel.qml`, `Record.qml` | QML | omarchy shell (Quickshell, Qt 6), `bash`, `find`, `sort`, `head`, `stat`, `dd`, `mkdir`, `chmod`, `timeout`, `hyprctl`, `head`, `od`, `inotifywait` (optional) |
 | `Model.js` | JavaScript (QML engine) | nothing |
 | `pi/muster.ts` | TypeScript | pi's bundled Bun runtime; node builtins only, zero npm packages |
-| `bin/muster-report` | Bash | `jq`, `flock`, `hyprctl` |
+| `bin/muster-report` | Bash | `jq`, `flock`, `stat`, `dd`, `mv`, `chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od`, `rm`, `hyprctl` |
 | alerts | — | `paplay` (or `pw-play`/`mpv`) and `omarchy-notification-send` |
 
-`bin/muster-doctor` checks all of it (`--json` for machines) and exits
-non-zero only when something required is missing.
+`bin/muster-doctor` checks all of these (`--json` for machines) and exits
+non-zero when a required one is missing. An unlinked pi bridge is reported as
+optional, not missing: the bridge is only needed if you use pi.
 
 Rust would not help here. It cannot be a Quickshell plugin or a pi extension,
 so a compiled component could only be a separate daemon with a socket — which
@@ -362,9 +400,10 @@ omarchy-shell shienze.muster test                        # prove the alert path
 
 - **Chip stays dim**: no record is being written. Run an agent, or write one by
   hand with `muster-report`.
-- **A session lingers after a crash**: it disappears `staleAfterSec` after the
-  last heartbeat.
-- **No sound**: `command -v paplay`, and check the *Completion sound* toggle.
+- **A session lingers after a crash**: it disappears from the widget
+  `staleAfterSec` after the last heartbeat, and its record is deleted a week
+  later (the shell prunes old records when it starts).
+- **No sound**: `command -v paplay`, and check the *Sound* toggle in the panel.
 - **IPC function missing after an edit**: `omarchy restart shell`.
 
 ## License

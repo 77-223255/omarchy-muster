@@ -4,9 +4,16 @@
 # pi. Any integration can call this to publish a session record; the plugin
 # watches the sessions directory and never talks to the agent itself.
 #
+# Nothing a caller types may travel as an argument. A process's argv is
+# world-readable through /proc/<pid>/cmdline while it runs, so the only options
+# that take text here take a descriptor: --prompt-fd, --message-fd, --name-fd,
+# --cwd-fd. The two remaining options, --agent and --session, are ids and are
+# validated against a plain charset, so they cannot carry text either.
+#
 #   # a run started — the prompt arrives on stdin, never as an argument
-#   printf '%s' "$PROMPT" | muster-report --agent claude --session "$ID" \
-#     --state working --name "Refactor auth" --prompt-fd 0
+#   { printf '%s' "$TITLE"; printf '%s' "$PROMPT"; } | muster-report \
+#     --agent claude --session "$ID" --state working \
+#     --name-fd 3 --prompt-fd 0 3< <(printf '%s' "$TITLE")
 #
 #   # a run finished (this is what triggers the sound + notification)
 #   muster-report --agent claude --session "$ID" --state idle --completed
@@ -35,9 +42,7 @@ usage() {
 Usage: muster-report --agent <id> --session <id> [options]
 
   --state <working|blocked|idle|unknown>  Session state (default: working)
-  --name <text>        Display name (argv-visible; prefer --name-fd)
   --name-fd <n>        Read the display name from descriptor n (never argv)
-  --cwd <path>         Working directory (default: $PWD; argv-visible)
   --cwd-fd <n>         Read the working directory from descriptor n (never argv)
   --prompt-fd <n>      Read the last prompt from descriptor n (never argv)
   --message-fd <n>     Read the blocked detail from descriptor n (never argv)
@@ -46,7 +51,8 @@ Usage: muster-report --agent <id> --session <id> [options]
   --herdr-pane <id>    herdr pane to focus (default: $HERDR_PANE_ID when in herdr)
   --completed          Increment completedRuns: a run just settled
   --remove             Delete the record and exit
-  --json               Print the resulting record
+  --json               Print the resulting record (which includes the
+                        prompt and the working directory) to stdout
   -h, --help           This text
 
 Environment:
@@ -81,20 +87,20 @@ print_json=0
 
 while (($# > 0)); do
   case "$1" in
-  --agent) agent="${2:-}"; shift 2 ;;
-  --session) session="${2:-}"; shift 2 ;;
-  --state) state="${2:-}"; shift 2 ;;
-  --name) name="${2:-}"; shift 2 ;;
-  --cwd) cwd="${2:-}"; shift 2 ;;
-  --prompt-fd) prompt_fd="${2:-}"; shift 2 ;;
-  --message-fd) message_fd="${2:-}"; shift 2 ;;
-  --name-fd) name_fd="${2:-}"; shift 2 ;;
-  --cwd-fd) cwd_fd="${2:-}"; shift 2 ;;
-  --prompt | --message)
-    fail "$1 puts user text on the process command line; pipe it to --prompt-fd/--message-fd instead" ;;
-  --pid) pid="${2:-}"; shift 2 ;;
-  --window) window="${2:-}"; shift 2 ;;
-  --herdr-pane) herdr_pane="${2:-}"; shift 2 ;;
+  --agent) agent="${2:-}"; shift 2 || fail "--agent needs a value" ;;
+  --session) session="${2:-}"; shift 2 || fail "--session needs a value" ;;
+  --state) state="${2:-}"; shift 2 || fail "--state needs a value" ;;
+  --name-fd) name_fd="${2:-}"; shift 2 || fail "--name-fd needs a value" ;;
+  --cwd-fd) cwd_fd="${2:-}"; shift 2 || fail "--cwd-fd needs a value" ;;
+  --prompt-fd) prompt_fd="${2:-}"; shift 2 || fail "--prompt-fd needs a value" ;;
+  --message-fd) message_fd="${2:-}"; shift 2 || fail "--message-fd needs a value" ;;
+  # The text forms are deliberately gone, not deprecated: text only enters
+  # through a descriptor.
+  --name | --cwd | --prompt | --message)
+    fail "$1 puts user text on the process command line; pipe it to --name-fd/--cwd-fd/--prompt-fd/--message-fd instead" ;;
+  --pid) pid="${2:-}"; shift 2 || fail "--pid needs a value" ;;
+  --window) window="${2:-}"; shift 2 || fail "--window needs a value" ;;
+  --herdr-pane) herdr_pane="${2:-}"; shift 2 || fail "--herdr-pane needs a value" ;;
   --completed) completed=1; shift ;;
   --remove) remove=1; shift ;;
   --json) print_json=1; shift ;;
@@ -110,18 +116,30 @@ working | blocked | idle | unknown) ;;
 *) fail "--state must be working, blocked, idle, or unknown" ;;
 esac
 
-[[ -z $herdr_pane || $herdr_pane =~ ^[A-Za-z0-9:_.-]+$ ]] ||
-  fail "--herdr-pane must be a plain pane id"
+# `--agent` and `--session` are the only values that still arrive as arguments,
+# because the record's file name is derived from them. They are ids, not text,
+# and are held to a plain charset: that keeps free text out of this process's
+# argv entirely, so the descriptor options below are the only way any user
+# content can enter the script.
+[[ $agent =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] ||
+  fail "--agent must be an id: letters, digits, dot, dash, underscore (max 64)"
+[[ $session =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] ||
+  fail "--session must be an id: letters, digits, dot, dash, underscore (max 64)"
+[[ $state =~ ^[a-z]+$ ]] || fail "--state must be working, blocked, idle, or unknown"
+[[ $herdr_pane =~ ^[A-Za-z0-9:_.-]{0,64}$ ]] ||
+  fail "--herdr-pane must be a plain pane id of at most 64 characters"
 # `--pid` reaches bash arithmetic in resolve_window, and arithmetic recursively
 # evaluates its input, so a non-numeric value is command execution:
 #   --pid 'i[$(id)]'  runs `id`
 # `set -u` does not prevent that because the array names used there are defined
 # locals. A number is the only accepted value.
-[[ $pid =~ ^[0-9]+$ ]] || fail "--pid must be a number"
+[[ $pid =~ ^[0-9]{1,10}$ ]] || fail "--pid must be a number of at most 10 digits"
+# `--window` is stored in the record and later handed to hyprctl, so it is
+# either one of the two keywords or a plain address — never free text.
+[[ $window =~ ^(auto|none|0x[0-9a-fA-F]{1,16})$ ]] ||
+  fail "--window must be auto, none, or a window address like 0x5591a…"
 # Every stored field is capped so one record can never exceed the reader's cap
 # and the shell never holds an unbounded value.
-agent=${agent:0:120}
-session=${session:0:120}
 name=${name:0:80}
 cwd=${cwd:0:1024}
 
@@ -132,7 +150,7 @@ cwd=${cwd:0:1024}
 # neither the shell nor the record can grow without bound.
 read_fd() {
   local fd="$1" cap="$2" value=""
-  IFS= read -r -N "$cap" value <&"$fd" || true
+  IFS= read -r -N "$cap" value <&"$fd" 2>/dev/null || true
   printf '%s' "$value"
 }
 
@@ -169,18 +187,60 @@ read_record() {
   dd if="$f" iflag=nofollow,nonblock bs="$MAX_RECORD_BYTES" count=1 status=none 2>/dev/null || true
 }
 
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster/sessions"
+state_base="${XDG_STATE_HOME:-$HOME/.local/state}"
+# XDG requires an absolute path. A relative one would silently relocate the
+# records next to wherever the caller happens to be, and one starting with "-"
+# would be parsed as an option by mktemp and friends below.
+[[ $state_base == /* ]] ||
+  fail "XDG_STATE_HOME must be an absolute path (got: $state_base)"
+# A trailing slash is trimmed, but an all-slash value stays "/": stripping it
+# would turn the state home into a relative path, or into an empty one the
+# checks below reject.
+[[ $state_base =~ ^/+$ ]] || state_base="${state_base%/}"
+state_dir="$state_base/omarchy/muster/sessions"
+
+# Every component this plugin creates under the state home must be a real
+# directory owned by this user. mkdir -p, chmod and every later open follow a
+# symlinked component, so a same-user writer that drops a link at
+# …/omarchy/muster would otherwise move the whole sessions directory — records
+# included — somewhere else. The state home itself is left alone: a user who
+# symlinks XDG_STATE_HOME into a dotfiles repo did that on purpose.
+require_owned_chain() {
+  local rest="${1#"$state_base"/}" part path="$state_base"
+  local -a parts=()
+  # Word splitting is wanted here and only here: the components of the path.
+  # IFS is scoped to this one read, never set globally, and noglob keeps a
+  # component that looks like a pattern from expanding to filenames.
+  set -f
+  IFS=/ read -r -a parts <<<"$rest" || true
+  set +f
+  for part in "${parts[@]}"; do
+    [[ -n $part ]] || continue
+    path="$path/$part"
+    [[ ! -L $path ]] || fail "$path is a symlink; refusing"
+    if [[ -e $path ]]; then
+      [[ -d $path ]] || fail "$path is not a directory"
+      [[ -O $path ]] || fail "$path is not owned by this user"
+    fi
+  done
+}
+
+require_owned_chain "$state_dir"
 mkdir -p "$state_dir" 2>/dev/null || fail "cannot create $state_dir"
-# Records hold the last prompt, so the directory must be a real directory owned
-# by this user, never a symlink a same-user writer could point at another
-# location. The lock below is taken on this directory, so it has to be checked
-# before it is opened.
+# Re-checked after the creation: the components were validated before mkdir
+# ran, and a same-user writer can swap one in between.
+require_owned_chain "$state_dir"
 [[ -d $state_dir && ! -L $state_dir && -O $state_dir ]] ||
   fail "$state_dir is not a directory owned by this user"
-chmod 700 "$state_dir" 2>/dev/null || true
 
 record_name="$(sanitize "$agent")-$(sanitize "$session").json"
 file="$state_dir/$record_name"
+# Once lock_dir holds fd 9, every read and write addresses the record through
+# that descriptor rather than through the path: /proc/self/fd/9/<name> resolves
+# to the very inode that was vetted, so a same-user writer that renames the
+# directory — or swaps a symlink in at any component — between the checks and
+# the write cannot redirect it. `dir_ref` is empty until the lock is held.
+dir_ref=""
 
 # Open the sessions directory read-only and lock it. There is no predictable
 # lock file to truncate and no symlink to follow, and the opened descriptor is
@@ -198,9 +258,11 @@ lock_dir() {
 
 if ((remove)); then
   lock_dir
-  rm -f "$file" "$file.lock"
+  # Through the descriptor lock_dir just opened, not through the path.
+  rm -f -- "/proc/self/fd/9/$record_name"
   exit 0
 fi
+
 
 # ------------------------------------------------------------- window id
 #
@@ -225,6 +287,9 @@ resolve_window() {
 
   local pid matches="" count=0
   for pid in "${chain[@]}"; do
+    # A number, so it could travel as an argument; the addresses below are
+    # compositor data, but they ride a descriptor anyway so that no value at
+    # all is ever handed to jq as a named argument.
     matches=$(jq -c --argjson pid "$pid" '[.[] | select(.pid == $pid)]' <<<"$clients" 2>/dev/null)
     count=$(jq 'length' <<<"${matches:-[]}" 2>/dev/null)
     [[ $count =~ ^[0-9]+$ ]] || count=0
@@ -249,7 +314,8 @@ resolve_window() {
   # window, then the most recently focused one.
   local focused address
   focused=$(hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null)
-  address=$(jq -r --arg f "$focused" '.[] | select(.address == $f) | .address' <<<"$matches" 2>/dev/null | head -n1)
+  address=$(jq -r --rawfile f <(printf '%s' "$focused") \
+    '.[] | select(.address == $f) | .address' <<<"$matches" 2>/dev/null | head -n1)
   if [[ -n $address && $address != null ]]; then
     printf '%s' "$address"
     return 0
@@ -267,59 +333,131 @@ esac
 # ------------------------------------------------------------ read/modify
 
 lock_dir
+dir_ref="/proc/self/fd/9"
 
-old=$(read_record "$file")
-jq -e . >/dev/null 2>&1 <<<"$old" || old='{}'
+# The mode is set through the locked descriptor, not through the path: fd 9 is
+# the very inode that lock_dir vetted, and a chmod that goes through the /proc
+# magic link acts on that inode, so a rename of the path cannot redirect it. The
+# read-back then keeps the promise honest — a filesystem that does not enforce
+# POSIX modes (FAT, some FUSE and network mounts) would otherwise leave the
+# prompts readable by every local user, and this turns that into a refusal
+# instead of a quiet leak.
+chmod 700 -- /proc/self/fd/9 2>/dev/null || true
+dir_mode=$(stat -Lc %a -- /proc/self/fd/9 2>/dev/null) || dir_mode="unknown"
+[[ $dir_mode == 700 ]] ||
+  fail "$state_dir is mode $dir_mode, not 700; refusing to write records where another user could read them"
+
+old=$(read_record "$dir_ref/$record_name")
+# Valid JSON is not enough: the merge below indexes the previous record by
+# field name, and a top-level array, string or number would make jq abort with
+# a type error. Because `set -e` is active, that aborted the writer before it
+# staged anything, so one such file wedged its session forever — every later
+# report failed silently and no completion ever alerted. Only an object is a
+# record; anything else is treated as no previous record at all.
+jq -e 'type == "object"' >/dev/null 2>&1 <<<"$old" || old='{}'
 
 now=$(date +%s%3N)
-project=$(basename "${cwd%/}")
+# Pure shell on purpose: basename(1) is an external process, and the working
+# directory would appear on its command line — world-readable through
+# /proc/<pid>/cmdline, which is exactly what the descriptor options above
+# exist to prevent. Parameter expansion keeps it in this process.
+project="${cwd%/}"
+project="${project##*/}"
+# Capped like the other fields, including the fresh value: only the inherited
+# one was capped before.
+project=${project:0:256}
 
+# Every string reaches jq through a private descriptor, never through its argv:
+# `--rawfile <(printf …)` puts only `/dev/fd/N` in the command line, and jq
+# reads the value from the pipe. `--arg name`/`--arg cwd` would put the session
+# name, the working directory and the project — all derived from what the user
+# typed — into `ps` output for every local user while this runs. Only numbers
+# (pid, timestamps, counters) are passed as arguments, and they carry nothing.
 merged=$(jq -c \
-  --arg agent "$agent" \
-  --arg session "$session" \
-  --arg state "$state" \
-  --arg name "$name" \
-  --arg cwd "$cwd" \
-  --arg project "$project" \
+  --rawfile agent <(printf '%s' "$agent") \
+  --rawfile session <(printf '%s' "$session") \
+  --rawfile state <(printf '%s' "$state") \
+  --rawfile name <(printf '%s' "$name") \
+  --rawfile cwd <(printf '%s' "$cwd") \
+  --rawfile project <(printf '%s' "$project") \
   --rawfile prompt <(printf '%s' "$prompt") \
   --rawfile message <(printf '%s' "$message") \
+  --rawfile window <(printf '%s' "$window_address") \
+  --rawfile pane <(printf '%s' "$herdr_pane") \
   --argjson pid "${pid:-0}" \
-  --arg window "$window_address" \
-  --arg herdrPane "$herdr_pane" \
   --argjson now "$now" \
   --argjson completed "$completed" \
   '
-  . as $old
+  # The previous record is untrusted input written by same-user code: its
+  # counters are taken by type, never by arithmetic on whatever was there, and
+  # its inherited strings are re-capped with the same limits the fields are
+  # written with, so a near-cap predecessor cannot push the merged record past
+  # the 64 KiB the reader accepts and make the session vanish.
+  def count: if type == "number" then (if . < 0 or . > 1e15 then 0 else . end) else 0 end;
+  def text($cap): if type == "string" then (.[0:$cap]) else "" end;
+  (if type == "object" then . else {} end) as $old
   | {
       schemaVersion: 1,
       agent: $agent,
       sessionId: $session,
-      name: (if $name != "" then $name else ($old.name // "") end),
-      cwd: (if $cwd != "" then $cwd else ($old.cwd // "") end),
-      project: (if $project != "" then $project else ($old.project // "") end),
+      name: (if $name != "" then $name else ($old.name | text(80)) end),
+      cwd: (if $cwd != "" then $cwd else ($old.cwd | text(1024)) end),
+      project: (if $project != "" then $project else ($old.project | text(256)) end),
       state: $state,
       message: (if $state == "blocked" then $message else "" end),
-      lastPrompt: (if $prompt != "" then $prompt else ($old.lastPrompt // "") end),
+      lastPrompt: (if $prompt != "" then $prompt else ($old.lastPrompt | text(240)) end),
       pid: $pid,
       windowAddress: $window,
-      herdrPane: $herdrPane,
+      herdrPane: $pane,
       updatedAt: $now,
-      completedRuns: (($old.completedRuns // 0) + $completed),
-      seq: (($old.seq // 0) + 1)
+      completedRuns: (($old.completedRuns | count) + $completed),
+      seq: (($old.seq | count) + 1)
     }
   ' <<<"$old")
 
-# Stage in a fresh mktemp file, then write it with O_NOFOLLOW: the exclusive
-# create refuses an existing path, including a symlink, and the random suffix
-# cannot be predicted, so a same-user writer cannot redirect the write at
-# another file. The rename publishes atomically.
-staging=$(mktemp "$state_dir/.muster.XXXXXXXX") ||
-  fail "cannot create a staging file in $state_dir"
+# The record this run will replace must be a plain file: the read above
+# refused anything else, and renaming onto a directory or a device node would
+# either fail or, worse, land somewhere a same-user writer chose.
+[[ ! -e $dir_ref/$record_name || (-f $dir_ref/$record_name && ! -L $dir_ref/$record_name) ]] ||
+  fail "$file exists and is not a regular file"
+
+# The merged record must still fit the reader's cap. Every field above is
+# bounded, so this is a backstop: a record the reader would refuse is never
+# published in the first place.
+merged_bytes=$(printf '%s' "$merged" | wc -c)
+[[ $merged_bytes -le $MAX_RECORD_BYTES ]] ||
+  fail "the merged record is $merged_bytes bytes, over the $MAX_RECORD_BYTES the reader accepts"
+
+# The staging file is created by the same open that writes it, with O_EXCL
+# (`conv=excl`): a name that already exists — including one pre-created as a
+# hardlink — makes the open fail instead of being followed or truncated.
+# mktemp followed by a separate redirect-by-name leaves a window between
+# creating the name and writing to it, and O_NOFOLLOW does not close it, because
+# a hardlink is not a symlink. umask 077 means the file is born 0600, so nothing
+# chmods a path afterwards (a chmod by name is the same window), and the rename
+# only ever moves a directory entry.
+rand=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n') ||
+  fail "cannot read randomness"
+staging=""
+attempt=0
+for attempt in 1 2 3 4 5; do
+  cand="$dir_ref/.muster.$rand.$attempt"
+  if printf '%s' "$merged" | dd of="$cand" conv=excl status=none 2>/dev/null; then
+    staging="$cand"
+    break
+  fi
+done
+[[ -n $staging ]] || fail "cannot create a staging file in $state_dir"
 trap 'rm -f "$staging"' EXIT
-printf '%s' "$merged" | dd of="$staging" oflag=nofollow status=none 2>/dev/null ||
-  fail "cannot write the staging file"
-chmod 600 "$staging" 2>/dev/null || true
-mv -f "$staging" "$file"
+# The staged record is verified before it is published: a filesystem that
+# ignores the mode would otherwise put the prompt somewhere other users can
+# read. mktemp already creates it 0600 under umask 077; this checks the result.
+staging_mode=$(stat -c %a -- "$staging" 2>/dev/null) || staging_mode="unknown"
+[[ $staging_mode == 600 ]] ||
+  fail "the staged record is mode $staging_mode, not 600; refusing to publish it"
+# -T: the destination is always treated as a file, so a symlink planted at the
+# record path is replaced rather than followed into a directory.
+mv -T -f -- "$staging" "$dir_ref/$record_name"
 
 ((print_json)) && printf '%s\n' "$merged"
 exit 0

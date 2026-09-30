@@ -17,27 +17,41 @@ _No response_
 ### Maintainer notes
 
 No build step, no package manager, and no network access at runtime: the plugin
-is four QML files plus one JavaScript helper, and it shells out only to
-`hyprctl`, `find`, `mkdir`, and — when it is installed — `inotifywait`, plus
-`paplay` and `omarchy-notification-send` for alerts.
+is four QML files, one JavaScript helper, two shell scripts and one optional
+agent plugin. The shell side uses `bash`, `find`, `sort`, `head`, `stat`, `dd`,
+`mkdir`, `chmod` and `timeout`, plus `inotifywait` when it is
+installed; the
+record writer `bin/muster-report` uses `jq`, `flock`, `dd`, `stat`, `mv`,
+`chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od` and `rm`; focusing a session uses
+`hyprctl` and, inside herdr, `herdr`; alerts use `paplay` and
+`omarchy-notification-send`. All of them are common desktop tools, and the
+plugin has no build step and no package of its own.
 
 State comes from records — one small JSON file per session under
 `~/.local/state/omarchy/muster/sessions/` — so the plugin never scrapes window
 titles or scans processes. The bundled pi bridge (`pi/muster.ts`) is optional
 and only affects pi; any other agent can be wired with the one-line
 `bin/muster-report` call documented in the README. Removing the plugin leaves
-nothing behind except that state directory.
+the state directory, the pi bridge symlink (if it was linked) and omarchy's own
+notification log behind; the removal steps in the README cover each.
 
 The records are owner-only (`0700`/`0600`), and `bin/muster-report` reads the
-prompt and blocked detail from a file descriptor (`--prompt-fd`/`--message-fd`),
-not a command-line argument, so user text never reaches a process's argv. It
-also refuses a sessions path that is not a real directory owned by the user,
-locks that directory read-only rather than a predictable lock file, and stages
-each record in an exclusive `mktemp` file written with `O_NOFOLLOW`, so a
-same-user writer cannot redirect a write through a planted symlink. Fields are
-capped, `--pid` is validated as numeric before it reaches bash arithmetic, and
-the shell service applies the same directory check before it creates or watches
-the path. The
+prompt, the blocked detail, the session name and the working directory from
+file descriptors (`--prompt-fd`, `--message-fd`, `--name-fd`, `--cwd-fd`), not
+command-line arguments, so that text never reaches a process's argv; every
+option that does reach a command line is limited to digits or a plain id
+charset. It refuses a sessions path that is not a real directory owned by the
+user, locks that directory read-only rather than through a predictable lock
+file, and addresses each record through that locked descriptor. Both bundled
+writers publish with an atomic rename from a staging file created exclusively
+and unpredictably (`O_EXCL` on a random name for both writers — the script's
+`dd conv=excl`, the bridge's `writeFileSync` with the `wx` flag), so a same-user
+writer cannot redirect a write through a planted symlink or hardlink. Fields
+are capped and the merged record is measured before it is published, and
+`--pid` is validated as numeric before it reaches bash arithmetic. The shell
+service enters and re-checks each directory component before it creates or
+prunes anything; the readers re-check every path they open (regular file, not a
+symlink, within the 64 KiB cap). The
 completion toast is content-free by default — the agent and a fixed state word,
 never the prompt. The version that does show the prompt is kept commented in
 `Service.qml` and documented as opt-in, because omarchy's notification path
