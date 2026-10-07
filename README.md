@@ -2,6 +2,16 @@
 
 **English** · [中文](README.zh.md)
 
+> [!WARNING]
+> **Early OSC 7501 experiment — not usable, not released.**
+> This branch is a place to keep an idea: what Muster would look like if it
+> spoke the Program Status Protocol (OSC 7501) end to end. The protocol itself
+> has not landed — only libghostty-vt parses it, the Ghostty application ignores
+> it, and no agent ships it — so most of this cannot be exercised yet. Expect
+> large, breaking changes to the record contract, the writers and the UI, and
+> expect it to be incomplete. Do not install or rely on this branch; use
+> `main`. See [`docs/osc7501.md`](docs/osc7501.md) for the sketch.
+
 Live coding-agent sessions in the Omarchy bar, with a completion sound and a
 desktop notification — without running a terminal multiplexer.
 
