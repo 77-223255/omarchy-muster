@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""
+muster-tap — run a program under a pty that turns OSC 7501 reports into
+muster session records.
+
+    muster-tap [--agent <id>] [--session <id>] -- <command> [args...]
+
+Muster speaks the Program Status Protocol (OSC 7501):
+https://www.superlogical.com/rex/docs/build/program-status
+
+Every other writer in this plugin needs the agent to call it. This one does
+not: it is a pty filter, the way `script(1)` is. It runs the command on a
+pseudo-terminal, forwards every byte unchanged to the real terminal, and when
+it sees an OSC 7501 report in the stream it publishes the same report as a
+record. That makes any program which already speaks OSC 7501 — no hook, no
+per-agent code — a first-class session to the widget.
+
+It is deliberately a per-session wrapper, not a daemon: nothing runs in the
+background, and nothing listens on a socket. It writes records by calling
+bin/muster-report with the report on a descriptor, so the record path vetting,
+the atomic O_EXCL publish, the field caps and the OSC parsing all live in one
+audited place; this program only reads the wire.
+
+This script is optional. It is only needed for an agent that emits OSC 7501
+itself; every agent with a hook still uses muster-report directly.
+"""
+
+import fcntl
+import os
+import pty
+import re
+import select
+import signal
+import struct
+import subprocess
+import sys
+import termios
+import tty
+
+OSC_PREFIX = b"\x1b]7501;"
+MAX_BODY = 4096  # the spec caps a whole sequence at 4096 bytes
+STATE_WORDS = {"idle", "working", "done", "blocked", "error", "clear"}
+
+
+def fail(message):
+    print(f"muster-tap: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def report_path():
+    override = os.environ.get("MUSTER_REPORT")
+    if override:
+        return override
+    here = os.path.dirname(os.path.realpath(__file__))
+    return os.path.join(here, "muster-report")
+
+
+# A record id is an id, not text: muster-report holds --agent/--session to a
+# plain charset, so a protocol `app` or `id` that carries anything else is
+# reduced here before it is handed over as an option value.
+def safe_id(value, fallback):
+    value = re.sub(r"[^A-Za-z0-9._-]", "_", str(value or ""))
+    value = value.lstrip(".-_")
+    return (value or fallback)[:64]
+
+
+# --------------------------------------------------------------- the wire
+
+class Scanner:
+    """Extract complete OSC 7501 bodies from a byte stream.
+
+    The bytes are forwarded to the terminal regardless; this only watches them.
+    A sequence split across reads is held until its terminator arrives, and a
+    partial OSC prefix at the end of a read is kept for the next one.
+    """
+
+    def __init__(self):
+        self.buf = b""
+
+    def feed(self, data):
+        self.buf += data
+        bodies = []
+        prefix = len(OSC_PREFIX)
+        while self.buf:
+            start = self.buf.find(OSC_PREFIX)
+            if start < 0:
+                # Keep only a tail that could be the beginning of a prefix.
+                keep = prefix - 1
+                if len(self.buf) > keep:
+                    self.buf = self.buf[-keep:]
+                break
+            # Bytes before the prefix were already forwarded; drop them here.
+            if start:
+                self.buf = self.buf[start:]
+            bel = self.buf.find(b"\x07", prefix)
+            st = self.buf.find(b"\x1b\\", prefix)
+            ends = [e for e in (bel, st) if e != -1]
+            if not ends:
+                # Incomplete. Give up only if it has grown past any legal
+                # sequence, so a hostile stream cannot pin memory.
+                if len(self.buf) > MAX_BODY + prefix:
+                    self.buf = b""
+                break
+            end = min(ends)
+            bodies.append(bytes(self.buf[prefix:end]))
+            self.buf = self.buf[end + (2 if end == st else 1):]
+        return bodies
+
+
+def parse_pairs(body):
+    """The protocol's key=value list. Unknown keys are ignored, last wins."""
+    pairs = {}
+    try:
+        text = body.decode("utf-8", "replace")
+    except Exception:
+        return pairs
+    for pair in text.split(":"):
+        if "=" not in pair:
+            continue
+        key, _, value = pair.partition("=")
+        key = key.strip()
+        if key:
+            pairs[key] = value.strip()
+    return pairs
+
+
+# --------------------------------------------------------------- terminal
+
+def winsize(fd):
+    try:
+        packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8)
+        rows, cols, xpix, ypix = struct.unpack("HHHH", packed)
+        return rows, cols, xpix, ypix
+    except OSError:
+        return None
+
+
+def apply_winsize(fd, size):
+    if size is None:
+        return
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", *size))
+    except OSError:
+        pass
+
+
+# ----------------------------------------------------------------- main
+
+def main(argv):
+    agent = ""
+    session = ""
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--":
+            index += 1
+            break
+        if arg == "--agent":
+            index += 1
+            if index >= len(argv):
+                fail("--agent needs a value")
+            agent = argv[index]
+        elif arg == "--session":
+            index += 1
+            if index >= len(argv):
+                fail("--session needs a value")
+            session = argv[index]
+        elif arg in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        elif arg.startswith("-"):
+            fail(f"unknown option: {arg}")
+        else:
+            break
+        index += 1
+
+    command = argv[index:]
+    if not command:
+        fail("no command given; usage: muster-tap [options] -- <command> [args...]")
+
+    report = report_path()
+    if not os.access(report, os.X_OK):
+        fail(f"{report} is not executable; run muster-doctor")
+
+    pid, master = pty.fork()
+    if pid == 0:  # child: the command on the pty
+        try:
+            os.execvp(command[0], command)
+        except OSError as error:
+            print(f"muster-tap: cannot run {command[0]}: {error}", file=sys.stderr)
+        finally:
+            os._exit(127)
+
+    # parent: relay between the real terminal and the pty.
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    is_tty = os.isatty(stdin_fd)
+    saved_term = None
+    if is_tty:
+        try:
+            saved_term = termios.tcgetattr(stdin_fd)
+            tty.setraw(stdin_fd)
+        except termios.error:
+            saved_term = None
+
+    size = winsize(stdout_fd) or winsize(stdin_fd)
+    apply_winsize(master, size)
+
+    def on_winch(_signum, _frame):
+        new_size = winsize(stdout_fd) or winsize(stdin_fd)
+        apply_winsize(master, new_size)
+        try:
+            os.kill(pid, signal.SIGWINCH)
+        except OSError:
+            pass
+
+    if is_tty:
+        signal.signal(signal.SIGWINCH, on_winch)
+
+    def on_term(_signum, _frame):
+        try:
+            os.kill(pid, _signum)
+        except OSError:
+            pass
+
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGHUP, on_term)
+
+    scanner = Scanner()
+    last_state = None
+    last_agent = ""
+    last_session = ""
+
+    def publish(body):
+        nonlocal last_state, last_agent, last_session
+        if body.strip() == b"?":
+            # Feature detection: the whole body is `?`. Answer as the terminal,
+            # so a program that asks before reporting starts reporting. A
+            # terminal that also answers only makes a harmless duplicate.
+            try:
+                os.write(master, b"\x1b]7501;?\x1b\\")
+            except OSError:
+                pass
+            return
+        pairs = parse_pairs(body)
+        state = pairs.get("state", "")
+        if state == "clear":
+            last_state = "clear"
+            return
+        if state not in STATE_WORDS:
+            return
+        who = safe_id(agent or pairs.get("app", ""), "agent")
+        sid = safe_id(session or pairs.get("id", ""), f"tap-{pid}")
+        last_state, last_agent, last_session = state, who, sid
+        try:
+            subprocess.run(
+                [report, "--agent", who, "--session", sid, "--osc-fd", "0"],
+                input=body, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            pass
+
+    try:
+        watch_stdin = True
+        while True:
+            watched = [master, stdin_fd] if watch_stdin else [master]
+            readable, _, _ = select.select(watched, [], [])
+            if master in readable:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    data = b""
+                if not data:
+                    break
+                os.write(stdout_fd, data)
+                for body in scanner.feed(data):
+                    publish(body)
+            if watch_stdin and stdin_fd in readable:
+                try:
+                    data = os.read(stdin_fd, 65536)
+                except OSError:
+                    data = b""
+                if data:
+                    os.write(master, data)
+                else:
+                    # End of input: stop watching stdin, or a closed pipe would
+                    # keep select reporting it readable and spin the loop.
+                    watch_stdin = False
+    finally:
+        if saved_term is not None:
+            try:
+                termios.tcsetattr(stdin_fd, termios.TCSAFLUSH, saved_term)
+            except termios.error:
+                pass
+
+    _, status = os.waitpid(pid, 0)
+    code = os.waitstatus_to_exitcode(status)
+
+    # Process exit is one of the events the spec drops working/blocked on; a
+    # settled done/error record is left behind for the user to find.
+    if last_state is not None and last_state not in ("done", "error", "clear"):
+        subprocess.run(
+            [report, "--agent", last_agent, "--session", last_session, "--remove"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+    return code if code >= 0 else 128 - code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

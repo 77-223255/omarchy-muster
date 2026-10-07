@@ -4,11 +4,23 @@
 # pi. Any integration can call this to publish a session record; the plugin
 # watches the sessions directory and never talks to the agent itself.
 #
+# It is the hook-side front end of the Program Status Protocol (OSC 7501):
+#   https://www.superlogical.com/rex/docs/build/program-status
+# A caller can set the standard fields with options, or hand over the exact
+# key=value body a program would write to its terminal — state, kind, progress,
+# id, app, title, msg — on a descriptor with --osc-fd. With --emit-osc the same
+# report is written back to a terminal as a real OSC 7501 sequence, so any
+# consumer (Rex today, Ghostty and others later) sees it too.
+#
 # Nothing a caller types may travel as an argument. A process's argv is
 # world-readable through /proc/<pid>/cmdline while it runs, so the only options
 # that take text here take a descriptor: --prompt-fd, --message-fd, --name-fd,
-# --cwd-fd. The two remaining options, --agent and --session, are ids and are
-# validated against a plain charset, so they cannot carry text either.
+# --cwd-fd, --osc-fd. The remaining options are ids, state words and numbers and
+# are validated against fixed shapes, so they cannot carry text either.
+#
+#   # a protocol-native writer: emit the sequence and publish the record at once
+#   printf '%s' "$OSC_BODY" | muster-report --agent claude --session "$ID" \
+#     --osc-fd 0 --emit-osc tty
 #
 #   # a run started — the prompt arrives on stdin, never as an argument
 #   { printf '%s' "$TITLE"; printf '%s' "$PROMPT"; } | muster-report \
@@ -16,18 +28,22 @@
 #     --name-fd 3 --prompt-fd 0 3< <(printf '%s' "$TITLE")
 #
 #   # a run finished (this is what triggers the sound + notification)
-#   muster-report --agent claude --session "$ID" --state idle --completed
+#   muster-report --agent claude --session "$ID" --state done --emit-osc tty
 #
 #   # waiting on the user
 #   printf '%s' "approve the patch" | muster-report --agent claude --session "$ID" \
-#     --state blocked --message-fd 0
+#     --state blocked --kind permission --message-fd 0
+#
+#   # failed
+#   muster-report --agent claude --session "$ID" --state error
 #
 #   # gone
 #   muster-report --agent claude --session "$ID" --remove
 #
 # `--agent` takes any id omarchy ships (pi, omp, opencode, claude, codex, crush,
 # grok, gemini, openclaw, hermes, copilot, muse, cursor-agent) plus their
-# aliases; an unknown id still works and gets the generic mark.
+# aliases; an unknown id still works and gets the generic mark. It may instead
+# come from `app=` in the OSC body.
 
 set -euo pipefail
 
@@ -41,7 +57,18 @@ usage() {
   cat <<'USAGE'
 Usage: muster-report --agent <id> --session <id> [options]
 
-  --state <working|blocked|idle|unknown>  Session state (default: working)
+  --state <idle|working|done|blocked|error|clear|unknown>
+                       Session state (default: working). `done` and `error`
+                       are the settled states: they trigger the alert, survive
+                       process exit, and are what a finished run reports.
+                       `clear` removes the record, like --remove.
+  --kind <permission|question|auth>
+                       Why a `blocked` session is waiting (OSC 7501 kind).
+  --progress <0-100>   Progress for a working/blocked session.
+  --record-id <id>     OSC 7501 record id, e.g. build/test.
+  --osc-fd <n>         Read an OSC 7501 key=value body from descriptor n and
+                       take state/kind/progress/id/app/title/msg from it.
+  --emit-osc <fd|tty>  Write the report to a terminal as an OSC 7501 sequence.
   --name-fd <n>        Read the display name from descriptor n (never argv)
   --cwd-fd <n>         Read the working directory from descriptor n (never argv)
   --prompt-fd <n>      Read the last prompt from descriptor n (never argv)
@@ -68,7 +95,10 @@ fail() {
 
 agent=""
 session=""
-state="working"
+state=""
+kind=""
+progress=""
+record_id=""
 name=""
 cwd="$PWD"
 prompt=""
@@ -77,6 +107,8 @@ prompt_fd=""
 message_fd=""
 name_fd=""
 cwd_fd=""
+osc_fd=""
+emit_osc=""
 pid="$PPID"
 window="auto"
 herdr_pane=""
@@ -90,10 +122,15 @@ while (($# > 0)); do
   --agent) agent="${2:-}"; shift 2 || fail "--agent needs a value" ;;
   --session) session="${2:-}"; shift 2 || fail "--session needs a value" ;;
   --state) state="${2:-}"; shift 2 || fail "--state needs a value" ;;
+  --kind) kind="${2:-}"; shift 2 || fail "--kind needs a value" ;;
+  --progress) progress="${2:-}"; shift 2 || fail "--progress needs a value" ;;
+  --record-id) record_id="${2:-}"; shift 2 || fail "--record-id needs a value" ;;
   --name-fd) name_fd="${2:-}"; shift 2 || fail "--name-fd needs a value" ;;
   --cwd-fd) cwd_fd="${2:-}"; shift 2 || fail "--cwd-fd needs a value" ;;
   --prompt-fd) prompt_fd="${2:-}"; shift 2 || fail "--prompt-fd needs a value" ;;
   --message-fd) message_fd="${2:-}"; shift 2 || fail "--message-fd needs a value" ;;
+  --osc-fd) osc_fd="${2:-}"; shift 2 || fail "--osc-fd needs a value" ;;
+  --emit-osc) emit_osc="${2:-}"; shift 2 || fail "--emit-osc needs a value" ;;
   # The text forms are deliberately gone, not deprecated: text only enters
   # through a descriptor.
   --name | --cwd | --prompt | --message)
@@ -109,23 +146,120 @@ while (($# > 0)); do
   esac
 done
 
-[[ -n $agent ]] || fail "--agent is required"
-[[ -n $session ]] || fail "--session is required"
-case "$state" in
-working | blocked | idle | unknown) ;;
-*) fail "--state must be working, blocked, idle, or unknown" ;;
-esac
+# User text and paths never travel as arguments when a caller can pass a file
+# descriptor instead: a process's argv is world-readable through
+# /proc/<pid>/cmdline while it runs, and no file mode can protect a value
+# handed over that way. `read` is a shell builtin, and each read is capped so
+# neither the shell nor the record can grow without bound.
+read_fd() {
+  local fd="$1" cap="$2" value=""
+  IFS= read -r -N "$cap" value <&"$fd" 2>/dev/null || true
+  printf '%s' "$value"
+}
 
-# `--agent` and `--session` are the only values that still arrive as arguments,
-# because the record's file name is derived from them. They are ids, not text,
-# and are held to a plain charset: that keeps free text out of this process's
-# argv entirely, so the descriptor options below are the only way any user
-# content can enter the script.
+# Free text and paths never reach a file name directly: a session id becomes
+# `<agent>-<session>.json`, so it is reduced to a plain, path-safe token first.
+sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
+
+[[ -z $prompt_fd || $prompt_fd =~ ^[0-9]+$ ]] ||
+  fail "--prompt-fd must be a descriptor number"
+[[ -z $message_fd || $message_fd =~ ^[0-9]+$ ]] ||
+  fail "--message-fd must be a descriptor number"
+[[ -z $name_fd || $name_fd =~ ^[0-9]+$ ]] ||
+  fail "--name-fd must be a descriptor number"
+[[ -z $cwd_fd || $cwd_fd =~ ^[0-9]+$ ]] ||
+  fail "--cwd-fd must be a descriptor number"
+[[ -z $osc_fd || $osc_fd =~ ^[0-9]+$ ]] ||
+  fail "--osc-fd must be a descriptor number"
+[[ -z $emit_osc || $emit_osc =~ ^(tty|[0-9]+)$ ]] ||
+  fail "--emit-osc must be a descriptor number or \"tty\""
+
+# ------------------------------------------------------------- OSC 7501 in
+
+# Decode a protocol free-text value: standard base64 of UTF-8, padding
+# optional. A value that does not decode, or that decodes to a control
+# character, is dropped whole — the spec forbids control characters and a
+# newline in a project name would forge card text.
+osc_text() {
+  local encoded="$1" decoded
+  [[ -n $encoded ]] || return 0
+  [[ $encoded =~ ^[A-Za-z0-9+/=]*$ ]] || return 0
+  decoded=$(printf '%s' "$encoded" | base64 -d 2>/dev/null) || return 0
+  [[ $decoded == *[[:cntrl:]]* ]] && return 0
+  printf '%s' "$decoded"
+}
+
+if [[ -n $osc_fd ]]; then
+  raw_osc=$(read_fd "$osc_fd" 4096)
+  # Accept either the bare body ("state=…:…") or a whole sequence, so a hook
+  # can pipe the very bytes it wrote to its tty straight through. Trailing BEL
+  # or ESC \ is stripped; anything the caller leaves is an unknown pair and is
+  # ignored below.
+  raw_osc=${raw_osc#$'\033]7501;'}
+  raw_osc=${raw_osc%$'\033\\'}
+  raw_osc=${raw_osc%$'\a'}
+  osc_state="" osc_kind="" osc_progress="" osc_app="" osc_id="" osc_title="" osc_msg=""
+  # Pairs are ':'-separated, and the value charset excludes ':' and ';', so a
+  # plain split is exact. A malformed pair is skipped; the rest still applies.
+  # Unknown keys are ignored — that is how the protocol extends.
+  IFS=':' read -r -a osc_pairs <<<"$raw_osc" || true
+  for pair in "${osc_pairs[@]}"; do
+    [[ $pair == *=* ]] || continue
+    key=${pair%%=*}
+    val=${pair#*=}
+    # The spec removes whitespace around keys and values. A value's own charset
+    # excludes space, so stripping it cannot lose anything that was meant.
+    key=${key//[[:space:]]/}
+    val=${val//[[:space:]]/}
+    case "$key" in
+    state) osc_state=$val ;;
+    kind) osc_kind=$val ;;
+    progress) osc_progress=$val ;;
+    app) osc_app=$val ;;
+    id) osc_id=$val ;;
+    title) osc_title=$val ;;
+    msg) osc_msg=$val ;;
+    esac
+  done
+  # Explicit options win; the body fills only what was not given.
+  [[ -n $agent ]] || agent=$osc_app
+  # A protocol id may contain `/` (build/test); the record file name must not,
+  # so it is sanitized here and the raw id is kept in recordId below.
+  [[ -n $session ]] || session=$(sanitize "$osc_id")
+  [[ -n $record_id ]] || record_id=$osc_id
+  [[ -n $name ]] || name=$(osc_text "$osc_title")
+  [[ -n $message ]] || message=$(osc_text "$osc_msg")
+  [[ -n $kind ]] || kind=$osc_kind
+  [[ -n $progress ]] || progress=$osc_progress
+  [[ -n $state ]] || state=$osc_state
+fi
+
+state=${state:-working}
+
+[[ -n $agent ]] || fail "--agent is required (or app= in the --osc-fd body)"
+[[ -n $session ]] || fail "--session is required (or id= in the --osc-fd body)"
+case "$state" in
+working | blocked | done | error | idle | unknown | clear) ;;
+*) fail "--state must be working, blocked, done, error, idle, unknown, or clear" ;;
+esac
+case "$kind" in
+"" | permission | question | auth) ;;
+*) fail "--kind must be permission, question, or auth" ;;
+esac
+[[ -z $progress || $progress =~ ^([0-9]|[1-9][0-9]|100)$ ]] ||
+  fail "--progress must be an integer 0..100"
+[[ -z $record_id || $record_id =~ ^[A-Za-z0-9_.+-]{1,32}(/[A-Za-z0-9_.+-]{1,32}){0,7}$ ]] ||
+  fail "--record-id must be a protocol id: segments of [A-Za-z0-9_.+-], at most 8 levels"
+
+# `--agent` and `--session` name the record file. They are ids, not text, and
+# are held to a plain charset: that keeps free text out of this process's argv
+# entirely, so the descriptor options below are the only way any user content
+# can enter the script.
 [[ $agent =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] ||
   fail "--agent must be an id: letters, digits, dot, dash, underscore (max 64)"
 [[ $session =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] ||
   fail "--session must be an id: letters, digits, dot, dash, underscore (max 64)"
-[[ $state =~ ^[a-z]+$ ]] || fail "--state must be working, blocked, idle, or unknown"
+[[ $state =~ ^[a-z]+$ ]] || fail "--state is not a known state word"
 [[ $herdr_pane =~ ^[A-Za-z0-9:_.-]{0,64}$ ]] ||
   fail "--herdr-pane must be a plain pane id of at most 64 characters"
 # `--pid` reaches bash arithmetic in resolve_window, and arithmetic recursively
@@ -141,33 +275,13 @@ esac
 # Every stored field is capped so one record can never exceed the reader's cap
 # and the shell never holds an unbounded value.
 name=${name:0:80}
+message=${message:0:240}
 cwd=${cwd:0:1024}
 
-# User text and paths never travel as arguments when a caller can pass a file
-# descriptor instead: a process's argv is world-readable through
-# /proc/<pid>/cmdline while it runs, and no file mode can protect a value
-# handed over that way. `read` is a shell builtin, and each read is capped so
-# neither the shell nor the record can grow without bound.
-read_fd() {
-  local fd="$1" cap="$2" value=""
-  IFS= read -r -N "$cap" value <&"$fd" 2>/dev/null || true
-  printf '%s' "$value"
-}
-
-[[ -z $prompt_fd || $prompt_fd =~ ^[0-9]+$ ]] ||
-  fail "--prompt-fd must be a descriptor number"
-[[ -z $message_fd || $message_fd =~ ^[0-9]+$ ]] ||
-  fail "--message-fd must be a descriptor number"
-[[ -z $name_fd || $name_fd =~ ^[0-9]+$ ]] ||
-  fail "--name-fd must be a descriptor number"
-[[ -z $cwd_fd || $cwd_fd =~ ^[0-9]+$ ]] ||
-  fail "--cwd-fd must be a descriptor number"
 [[ -n $prompt_fd ]] && prompt=$(read_fd "$prompt_fd" 240)
 [[ -n $message_fd ]] && message=$(read_fd "$message_fd" 240)
 [[ -n $name_fd ]] && name=$(read_fd "$name_fd" 80)
 [[ -n $cwd_fd ]] && cwd=$(read_fd "$cwd_fd" 1024)
-
-sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
 
 # ------------------------------------------------------------- state paths
 
@@ -256,8 +370,34 @@ lock_dir() {
   [[ -n $fd_id && $fd_id == "$path_id" ]] || fail "$state_dir changed while it was being locked"
 }
 
-if ((remove)); then
+# ------------------------------------------------------------- OSC 7501 out
+
+# Write the report to a terminal as an OSC 7501 sequence. Best effort only: a
+# report must never fail the writer because a hook had no controlling tty. The
+# sequence is a fixed state, a validated id/list, and base64 — nothing that can
+# break out of the escape, and `printf` is a builtin fed by a variable, so no
+# shell source is built from it.
+b64() { printf '%s' "$1" | base64 -w0; }
+
+emit_report() {
+  [[ -n $emit_osc ]] || return 0
+  local seq="state=$state"
+  [[ -n $kind ]] && seq+=":kind=$kind"
+  [[ -n $progress ]] && seq+=":progress=$progress"
+  seq+=":app=$agent"
+  [[ -n $name ]] && seq+=":title=$(b64 "$name")"
+  [[ -n $message ]] && seq+=":msg=$(b64 "$message")"
+  [[ -n $record_id ]] && seq+=":id=$record_id"
+  if [[ $emit_osc == tty ]]; then
+    { printf '\033]7501;%s\033\\' "$seq" >/dev/tty; } 2>/dev/null || true
+  else
+    { printf '\033]7501;%s\033\\' "$seq" >&"$emit_osc"; } 2>/dev/null || true
+  fi
+}
+
+if ((remove)) || [[ $state == clear ]]; then
   lock_dir
+  emit_report
   # Through the descriptor lock_dir just opened, not through the path.
   rm -f -- "/proc/self/fd/9/$record_name"
   exit 0
@@ -377,6 +517,9 @@ merged=$(jq -c \
   --rawfile agent <(printf '%s' "$agent") \
   --rawfile session <(printf '%s' "$session") \
   --rawfile state <(printf '%s' "$state") \
+  --rawfile kind <(printf '%s' "$kind") \
+  --rawfile progress <(printf '%s' "$progress") \
+  --rawfile recordid <(printf '%s' "$record_id") \
   --rawfile name <(printf '%s' "$name") \
   --rawfile cwd <(printf '%s' "$cwd") \
   --rawfile project <(printf '%s' "$project") \
@@ -396,21 +539,32 @@ merged=$(jq -c \
   def count: if type == "number" then (if . < 0 or . > 1e15 then 0 else . end) else 0 end;
   def text($cap): if type == "string" then (.[0:$cap]) else "" end;
   (if type == "object" then . else {} end) as $old
+  | (($old.state // "") | tostring) as $oldstate
+  # A settled report is a finished run: when the record was not already settled,
+  # it counts as one completion, so a plain `--state done` triggers the alert
+  # without the caller also having to pass --completed.
+  | (if ($state == "done" or $state == "error") and $oldstate != "done" and $oldstate != "error" then 1 else 0 end) as $settled
   | {
-      schemaVersion: 1,
+      schemaVersion: 2,
       agent: $agent,
       sessionId: $session,
       name: (if $name != "" then $name else ($old.name | text(80)) end),
       cwd: (if $cwd != "" then $cwd else ($old.cwd | text(1024)) end),
       project: (if $project != "" then $project else ($old.project | text(256)) end),
       state: $state,
-      message: (if $state == "blocked" then $message else "" end),
+      kind: (if $state == "blocked" then $kind else "" end),
+      progress: (if ($state == "working" or $state == "blocked") and $progress != ""
+        then (($progress | tonumber?) // -1) else -1 end),
+      recordId: (if $recordid != "" then $recordid else ($old.recordId | text(128)) end),
+      message: (if ($state == "blocked" or $state == "done" or $state == "error")
+        then (if $message != "" then $message else ($old.message | text(240)) end)
+        else "" end),
       lastPrompt: (if $prompt != "" then $prompt else ($old.lastPrompt | text(240)) end),
       pid: $pid,
       windowAddress: $window,
       herdrPane: $pane,
       updatedAt: $now,
-      completedRuns: (($old.completedRuns | count) + $completed),
+      completedRuns: (($old.completedRuns | count) + $completed + $settled),
       seq: (($old.seq | count) + 1)
     }
   ' <<<"$old")
@@ -458,6 +612,10 @@ staging_mode=$(stat -c %a -- "$staging" 2>/dev/null) || staging_mode="unknown"
 # -T: the destination is always treated as a file, so a symlink planted at the
 # record path is replaced rather than followed into a directory.
 mv -T -f -- "$staging" "$dir_ref/$record_name"
+
+# The record is published; only now mirror it to the terminal, so a consumer
+# never sees a report the record writer refused.
+emit_report
 
 ((print_json)) && printf '%s\n' "$merged"
 exit 0

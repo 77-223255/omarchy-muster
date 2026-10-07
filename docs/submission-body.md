@@ -22,25 +22,34 @@ agent plugin. The shell side uses `bash`, `find`, `sort`, `head`, `stat`, `dd`,
 `mkdir`, `chmod` and `timeout`, plus `inotifywait` when it is
 installed; the
 record writer `bin/muster-report` uses `jq`, `flock`, `dd`, `stat`, `mv`,
-`chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od` and `rm`; focusing a session uses
+`chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od`, `base64` and `rm`; focusing a session uses
 `hyprctl` and, inside herdr, `herdr`; alerts use `paplay` and
-`omarchy-notification-send`. All of them are common desktop tools, and the
+`omarchy-notification-send`. The optional pty receiver `bin/muster-tap` is
+Python 3 (standard library only). All of them are common desktop tools, and the
 plugin has no build step and no package of its own.
 
-State comes from records — one small JSON file per session under
-`~/.local/state/omarchy/muster/sessions/` — so the plugin never scrapes window
-titles or scans processes. The bundled pi bridge (`pi/muster.ts`) is optional
-and only affects pi; any other agent can be wired with the one-line
+State comes from the Program Status Protocol (OSC 7501) — the terminal-native
+way for a program to report `idle`/`working`/`done`/`blocked`/`error` — carried
+as one small JSON record per session under
+`~/.local/state/omarchy/muster/sessions/`. An agent either writes the record
+with `bin/muster-report`, or emits the protocol sequence on its pty and
+`bin/muster-tap` turns it into the same record; either way the plugin never
+scrapes window titles or scans processes. The bundled pi bridge (`pi/muster.ts`)
+is optional and only affects pi; any other agent can be wired with the one-line
 `bin/muster-report` call documented in the README. Removing the plugin leaves
 the state directory, the pi bridge symlink (if it was linked) and omarchy's own
 notification log behind; the removal steps in the README cover each.
 
 The records are owner-only (`0700`/`0600`), and `bin/muster-report` reads the
-prompt, the blocked detail, the session name and the working directory from
-file descriptors (`--prompt-fd`, `--message-fd`, `--name-fd`, `--cwd-fd`), not
+prompt, the blocked detail, the session name, the working directory and an
+OSC 7501 body from
+file descriptors (`--prompt-fd`, `--message-fd`, `--name-fd`, `--cwd-fd`,
+`--osc-fd`), not
 command-line arguments, so that text never reaches a process's argv; every
 option that does reach a command line is limited to digits or a plain id
-charset. It refuses a sessions path that is not a real directory owned by the
+charset. A base64 value that does not decode, or that decodes to a control
+character, is dropped whole. It refuses a sessions path that is not a real
+directory owned by the
 user, locks that directory read-only rather than through a predictable lock
 file, and addresses each record through that locked descriptor. Both bundled
 writers publish with an atomic rename from a staging file created exclusively

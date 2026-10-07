@@ -21,8 +21,8 @@ BarWidget {
 
   readonly property var sessions: svc && svc.sessions ? svc.sessions : []
   readonly property var summary: Model.summarize(sessions)
-  readonly property bool anyBlocked: summary.blocked > 0
-  readonly property bool anyWorking: summary.working > 0 || anyBlocked
+  readonly property bool anyBlocked: summary.blocked > 0 || summary.error > 0
+  readonly property bool anyWorking: summary.working > 0 || summary.done > 0 || anyBlocked
   readonly property bool horizontal: !(bar && bar.vertical)
 
   // Always visible: the chip is the way into the panel, so it keeps a bell
@@ -54,8 +54,8 @@ BarWidget {
   // The chip as a whole still tracks the aggregate (the button's active tint
   // below), so "something needs you" stays visible at a glance.
   function markColor(state) {
-    if (state === "blocked") return bar ? bar.urgent : Color.urgent
-    if (state === "working") return Color.accent
+    if (state === "blocked" || state === "error") return bar ? bar.urgent : Color.urgent
+    if (state === "working" || state === "done") return Color.accent
     if (state === "idle") return chipForeground
     return Util.alpha(chipForeground, 0.45)
   }
@@ -174,6 +174,8 @@ BarWidget {
         details.push({
           agent: session.agent,
           state: session.state,
+          kind: session.kind,
+          progress: session.progress,
           folder: Model.folderLabel(session),
           pid: session.pid,
           completedRuns: session.completedRuns,

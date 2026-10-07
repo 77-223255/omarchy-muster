@@ -34,13 +34,19 @@
 
 ## 状态是怎么来的
 
-**只认记录(records)。** agent 每个会话写一个小 JSON 文件,插件只监听那个目录。
-状态从不来自窗口标题或进程列表,也没有规则引擎 —— 没有任何会猜错状态、或者悄悄
-失效的东西。(写记录时会沿父进程链查一次窗口 id,但那只是为了让点击能聚焦到
-正确的终端,从不参与判断状态。)自带的 pi 桥接上报精确的 `working` / `blocked` / `idle`,外加一个
-`completedRuns` 计数器,让"刚跑完一次"不可能被漏掉。
+**只认上报,从不猜。** Muster 说的是[程序状态协议][osc7501](OSC 7501)—— 程序向终端
+汇报自己在干什么的终端原生方式:`idle`、`working`、`done`、`blocked`、`error`,
+外加 `kind`、`progress` 和一行 `msg`。agent 要么每个会话写一个小 JSON 记录(插件
+监听目录),要么在自己的 pty 上直接发这个协议序列(由 `bin/muster-tap` 转成同样的
+记录)。状态从不来自窗口标题或进程列表,也没有规则引擎 —— 没有任何会猜错状态、或者
+悄悄失效的东西。(写记录时会沿父进程链查一次窗口 id,但那只是为了让点击能聚焦到
+正确的终端,从不参与判断状态。)自带的 pi 桥接上报精确的状态、同时发出协议序列,
+外加一个 `completedRuns` 计数器,让“刚跑完一次”不可能被漏掉。
 
-所以接入别的 agent 同样是精确的:写记录即可,见下面的「接入其它 agent」。
+所以接入别的 agent 同样是精确的:上报状态即可,见下面的「接入其它 agent」,映射表在
+[`docs/osc7501.md`](docs/osc7501.md)。
+
+[osc7501]: https://www.superlogical.com/rex/docs/build/program-status
 
 ## 安装
 
@@ -151,7 +157,7 @@ record 由同一次打开独占创建并写入(`O_EXCL`)之后再原子改名—
 
 ```bash
 omarchy-shell shienze.muster status | jq '.details[]'
-# {"agent":"pi","state":"working","folder":"tiny-model-primitives",
+# {"agent":"pi","state":"working","kind":"","progress":-1,"folder":"tiny-model-primitives",
 #  "pid":835161,"completedRuns":3,"window":"0x601dc3f347b0"}
 ```
 
@@ -183,21 +189,26 @@ omarchy-shell shienze.muster status | jq '.details[]'
 
 | 字段 | 说明 |
 |-------|-------|
-| `schemaVersion` | `1` |
-| `agent` | 必填;任何 id 都行,omarchy 自己的别名(`claude-code`、`oh-my-pi`、`cursor`…)会归并到规范 id |
+| `schemaVersion` | `2`(`1` 的记录仍可读) |
+| `agent` | 必填;协议的 `app`。任何 id 都行,omarchy 自己的别名(`claude-code`、`oh-my-pi`、`cursor`…)会归并到规范 id |
 | `sessionId`、`name`、`cwd`、`project` | 身份与显示;`project` 默认取 `cwd` 的最后一段;各字段有上限(name 80、cwd 1024、project 256、prompt/message 240) |
-| `state` | `working` \| `blocked` \| `idle` \| `unknown` |
-| `message` | `blocked` 时显示 |
+| `state` | `working` \| `blocked` \| `done` \| `error` \| `idle` \| `unknown` |
+| `kind` | `blocked` 时为 `permission` \| `question` \| `auth` |
+| `progress` | 整数 `0`–`100`,缺省为 `-1` |
+| `recordId` | 协议的层级 `id`(`build/test`),仅用于显示 |
+| `message` | 协议的 `msg`;`blocked`、`done`、`error` 时显示 |
 | `lastPrompt` | 显示在卡片上 |
 | `pid` | 归属进程;也是去重依据(同 pid 的多条只留最新) |
 | `windowAddress` | Hyprland 窗口地址;让通知被点击时能聚焦那个终端 |
 | `herdrPane` | herdr pane id;点击时切到那个 pane(最多 64 字符) |
-| `updatedAt` | 毫秒时间戳;决定过期(`staleAfterSec`) |
+| `updatedAt` | 毫秒时间戳;决定过期(`staleAfterSec`、`settledAfterSec`) |
 | `completedRuns` | **提醒的触发器** —— 每完成一次运行就 +1 |
 | `seq` | 单调递增的写入计数,用来在两条同 pid 记录里挑最新的 |
 
-提醒看的是 `completedRuns` **增长**,而不是状态变化 —— 所以哪怕一次很短的运行在
-两次扫描之间就 `working → idle` 过去了,也照样会响,且只响一次。
+提醒在“一次运行结束”时触发:`completedRuns` **增长**,或者状态**落定**为
+`done`/`error`。比计数器能挺过一次扫描间隔里错过的 `working → done` 跳变;状态边沿
+则能接住只上报状态的写入者。落定的记录活得比它的写入者久,按更长的
+`settledAfterSec` 时钟老化;聚焦它即视为“已阅”,卡片回落为 `idle`。
 
 ## omarchy 自带的 agent
 
@@ -231,6 +242,30 @@ omarchy-shell shienze.muster status | jq '.details[]'
 
 ## 接入其它 agent
 
+### 协议方式(不需要 hook)
+
+如果 agent 自己就会发 [OSC 7501][osc7501],用 pty 过滤器跑它,就没有别的要写了:
+
+```bash
+~/.config/omarchy/plugins/shienze.muster/bin/muster-tap --agent claude -- claude
+```
+
+`muster-tap` 原样转发 agent 的输出,把它看到的每条上报转成记录 —— 已经会说协议的
+agent 因此不需要任何 per-agent 代码。它自己回应协议的探测查询,并在 agent 退出时
+删掉“进行中”的记录(`done`/`error` 会保留下来)。
+
+hook 也可以把协议正文直接交给写入器:
+
+```bash
+printf '%s' "$OSC_BODY" | $report --agent claude --session "$ID" \
+        --osc-fd 0 --emit-osc tty
+```
+
+`--emit-osc tty` 会把同一条上报回写到终端,让支持 OSC 7501 的终端(目前是 Rex)
+也亮起来。
+
+### 记录方式
+
 不是 pi 的 agent,一律用 `bin/muster-report` 上报:
 
 ```bash
@@ -239,10 +274,14 @@ report=~/.config/omarchy/plugins/shienze.muster/bin/muster-report
 printf '%s' "$PROMPT" | $report --agent claude --session "$SESSION_ID" \
         --state working --name-fd 3 --prompt-fd 0 3<<<"$TITLE"
 printf '%s' "approve" | $report --agent claude --session "$SESSION_ID" \
-        --state blocked --message-fd 0
-$report --agent claude --session "$SESSION_ID" --state idle --completed  # 响一声 + 弹窗
+        --state blocked --kind permission --message-fd 0
+$report --agent claude --session "$SESSION_ID" --state done  # 响一声 + 弹窗
+$report --agent claude --session "$SESSION_ID" --state error
 $report --agent claude --session "$SESSION_ID" --remove
 ```
+
+`--state done` 和 `--state error` 是“落定”状态:会触发提醒,并且活得比进程久。
+`--state clear` 等同于 `--remove`。
 
 所有原本要打字的参数都从文件描述符传入——`--prompt-fd`、`--message-fd`、
 `--name-fd`、`--cwd-fd`,不走参数:进程命令行在运行期间对本地用户可读
@@ -289,15 +328,18 @@ $report --agent claude --session "$SESSION_ID" --remove
 | `Service.qml`、`BarWidget.qml`、`Panel.qml`、`Record.qml` | QML | omarchy shell(Quickshell、Qt 6)、`bash`、`find`、`sort`、`head`、`stat`、`dd`、`mkdir`、`chmod`、`timeout`、`hyprctl`、`head`、`od`、`inotifywait`(可选) |
 | `Model.js` | JavaScript(QML 引擎) | 无 |
 | `pi/muster.ts` | TypeScript | pi 自带的 Bun 运行时;只用 node 内置模块,零 npm 依赖 |
-| `bin/muster-report` | Bash | `jq`、`flock`、`stat`、`dd`、`mv`、`chmod`、`tr`、`cut`、`date`、`wc`、`awk`、`cat`、`head`、`od`、`rm`、`hyprctl` |
+| `bin/muster-report` | Bash | `jq`、`flock`、`stat`、`dd`、`mv`、`chmod`、`tr`、`cut`、`date`、`wc`、`awk`、`cat`、`head`、`od`、`base64`、`rm`、`hyprctl` |
+| `bin/muster-tap` | Python 3 | `pty`、`termios`、`select`、`fcntl`、`struct`(均为标准库);可选 —— 只给“自己发 OSC 7501、没有 hook”的 agent 用 |
 | 提醒 | — | `paplay`(或 `pw-play`/`mpv`)和 `omarchy-notification-send` |
 
 `bin/muster-doctor` 会把上面这些查一遍(`--json` 给机器读),必需项缺失时以非 0
 退出。没链接 pi 桥接只算"可选",不算缺失 —— 桥接只有用 pi 才需要。
 
 用 Rust 在这里没有收益:它既当不了 Quickshell 插件,也当不了 pi 扩展,编译型组件
-只能是"一个带 socket 的独立守护进程"(正是本插件要避免的重东西),或者替换掉一个
-在 omarchy 上本来就有的 `jq`+`flock` 脚本。
+只能是“一个带 socket 的独立守护进程”(正是本插件要避免的重东西),或者替换掉一个
+在 omarchy 上本来就有的 `jq`+`flock` 脚本。`bin/muster-tap` 特意用 Python:它是
+每会话的包装器,不是守护进程,而 Python 的 `pty` 和 `termios` 是过滤终端最短、最
+诚实的办法。
 
 ## 刻意不做的事
 
@@ -318,9 +360,11 @@ $report --agent claude --session "$SESSION_ID" --remove
 | `Panel.qml` | 会话面板和两个开关 |
 | `Record.qml` | 单条记录的文件监听 |
 | `Model.js` | 记录归一化、排序、agent 名字与标记 |
-| `pi/muster.ts` | pi → 记录 桥接 |
-| `bin/muster-report` | 给其它 agent 的记录写入器 |
+| `pi/muster.ts` | pi → 记录 + OSC 7501 桥接 |
+| `bin/muster-report` | 给其它 agent 的记录写入器与 OSC 7501 前端 |
+| `bin/muster-tap` | 可选的 pty 接收器:把线上的 OSC 7501 转成记录 |
 | `bin/muster-doctor` | 依赖体检 |
+| `docs/osc7501.md` | Muster 如何说程序状态协议 |
 | `assets/` | README 截图 |
 | `preview.png` | 市场列表卡片(可选,放根目录) |
 | `docs/submission-body.md` | 提交 issue 的正文 |

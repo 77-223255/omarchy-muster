@@ -8,6 +8,32 @@
 // longer is not a record and is dropped unparsed.
 var MAX_RECORD_BYTES = 65536
 
+// ---------------------------------------------------------- OSC 7501
+//
+// Muster speaks the Program Status Protocol (OSC 7501):
+// https://www.superlogical.com/rex/docs/build/program-status
+//
+// A program reports its own state as a list of key=value pairs on its pty; a
+// consumer keeps one record per id and applies the spec's lifetime rules. The
+// plugin consumes the same vocabulary through bin/muster-report (a hook writes
+// the pairs) and bin/muster-tap (a pty filter reads the escape sequence), and
+// stores it as one JSON object per session. The JSON keys are the protocol
+// keys where they exist — state, kind, progress, id, and the free-text keys
+// the spec base64s on the wire (msg -> message, title -> name, app -> agent) —
+// plus the fields the spec deliberately leaves to the consumer: pid,
+// windowAddress, herdrPane, updatedAt, completedRuns, seq.
+//
+//   state     idle | working | done | blocked | error
+//   kind      permission | question | auth      (blocked only)
+//   progress  0..100
+//   id        hierarchical record id, e.g. build/test
+//
+// `done` is a finished run the user has not seen; `error` is a failure that
+// stopped. Both outlive their writer, where working and blocked do not. `clear`
+// is a command, not a stored state, so it is never read back.
+var STATES = ["working", "blocked", "done", "error", "idle", "unknown"]
+var KINDS = ["permission", "question", "auth"]
+
 // Every agent omarchy ships as a selectable default (`omarchy default agent`),
 // with the ids and aliases that command accepts, and the mark omarchy's own
 // menu uses for it: `font: "omarchy"` is a brand glyph in
@@ -86,7 +112,13 @@ var DEFAULT_AGENT = { label: "agent" }
 // a notification, so it renders in every theme.
 var IDLE_GLYPH = "󰂚"
 
-var STATES = ["working", "blocked", "idle", "unknown"]
+// A settled state outlives the process that reported it: the spec keeps `done`
+// and `error` across process exit and a new shell prompt, and drops `working`
+// and `blocked` at both. Muster mirrors that with a longer staleness clock for
+// a settled record than for a live one.
+function isSettled(state) {
+  return state === "done" || state === "error"
+}
 
 // Returns the canonical id alongside the label and mark, so a record written
 // as "claude-code" groups with "claude" instead of becoming a second agent.
@@ -161,16 +193,33 @@ function toNumber(value, fallback) {
 // never shortened.
 function normalizeRecord(raw, path) {
   if (!raw || typeof raw !== "object") return null
-  var meta = agentMeta(raw.agent)
+  // Protocol `app` is the stable program name; muster's `agent` is the same
+  // field, and either spelling is accepted.
+  var meta = agentMeta(raw.agent !== undefined ? raw.agent : raw.app)
   if (meta.id === "") return null
 
   var state = (asText(raw.state) || "unknown").toLowerCase()
   if (STATES.indexOf(state) === -1) state = "unknown"
 
+  // kind is only meaningful for blocked; an unrecognised value is treated as
+  // absent, the way the spec says.
+  var kind = asText(raw.kind).toLowerCase()
+  if (KINDS.indexOf(kind) === -1) kind = ""
+
+  // progress is an integer 0..100; anything else is absent (-1).
+  var progress = toNumber(raw.progress, -1)
+  progress = (progress >= 0 && progress <= 100) ? Math.round(progress) : -1
+
+  // Protocol `id` is hierarchical (build/test). It is only ever a display
+  // label: it names no file and reaches no command line, and it is capped and
+  // stripped like every other untrusted string.
+  var recordId = printable(raw.recordId !== undefined ? raw.recordId : raw.id, 128).trim()
+
   var cwd = printable(raw.cwd, 1024)
   var declared = printable(raw.project, 256)
   var project = declared !== "" ? declared : projectFromCwd(cwd)
-  var name = printable(raw.name, 80).trim()
+  var name = printable(raw.name !== undefined ? raw.name : raw.title, 80).trim()
+  var message = printable(raw.message !== undefined ? raw.message : raw.msg, 240)
 
   return {
     path: asText(path),
@@ -183,7 +232,10 @@ function normalizeRecord(raw, path) {
     cwd: cwd,
     project: project,
     state: state,
-    message: printable(raw.message, 240),
+    kind: kind,
+    progress: progress,
+    recordId: recordId,
+    message: message,
     lastPrompt: printable(raw.lastPrompt, 240),
     pid: toNumber(raw.pid, 0),
     // Only a plain window address or pane id can ever reach a command line, so
@@ -201,13 +253,16 @@ function normalizeRecord(raw, path) {
 // ------------------------------------------------------------- ordering
 
 function stateRank(state) {
-  // blocked is what needs the user, so it outranks working for the top of the
-  // list; unknown means an agent reported without a state we recognise.
+  // blocked is what needs the user; error and done are results the user has
+  // not seen yet; working is in flight; idle is at rest. Unknown means an agent
+  // reported without a state we recognise.
   if (state === "blocked") return 0
-  if (state === "working") return 1
-  if (state === "unknown") return 2
-  if (state === "idle") return 3
-  return 4
+  if (state === "error") return 1
+  if (state === "done") return 2
+  if (state === "working") return 3
+  if (state === "unknown") return 4
+  if (state === "idle") return 5
+  return 6
 }
 
 function sortSessions(list) {
@@ -221,7 +276,7 @@ function sortSessions(list) {
   return copy
 }
 
-function isStale(session, now, staleAfterSec) {
+function isStale(session, now, staleAfterSec, settledAfterSec) {
   if (!staleAfterSec || staleAfterSec <= 0) return false
   // A record with no timestamp is malformed, not timeless: treating 0 as "not
   // stale" would let a writer pin a card forever, since nothing else ages it
@@ -230,17 +285,31 @@ function isStale(session, now, staleAfterSec) {
   // A timestamp in the future (a clock change, a buggy writer) would pin the
   // record forever, because now - updatedAt only ever goes negative.
   if (session.updatedAt > now + staleAfterSec * 1000) return true
-  return (now - session.updatedAt) > staleAfterSec * 1000
+  // A settled record (done/error) outlives the process that wrote it — the
+  // spec keeps it across process exit and a new prompt — so it ages on a much
+  // longer clock than a live working/blocked record, which needs a heartbeat.
+  var limit = isSettled(session.state) ? (settledAfterSec || staleAfterSec) : staleAfterSec
+  return (now - session.updatedAt) > limit * 1000
 }
 
 function summarize(sessions) {
-  var out = { working: 0, blocked: 0, idle: 0, unknown: 0 }
+  var out = { working: 0, blocked: 0, done: 0, error: 0, idle: 0, unknown: 0 }
   for (var i = 0; i < sessions.length; i++) {
     var state = sessions[i].state
     if (out[state] === undefined) out.unknown += 1
     else out[state] += 1
   }
   return out
+}
+
+// The alert fires when a run finishes. Two signals, either is enough: the
+// completedRuns counter grew (survives a scan that missed a fast transition),
+// or the session just settled into done/error (survives a writer that only
+// reports states, such as a plain OSC 7501 emitter).
+function shouldAlert(session, before) {
+  if (!before) return false
+  if (session.completedRuns > (before.completedRuns || 0)) return true
+  return isSettled(session.state) && !isSettled(before.state)
 }
 
 // ------------------------------------------------------------------ card
@@ -253,8 +322,20 @@ function folderLabel(session) {
 function stateLabel(state) {
   if (state === "working") return "working"
   if (state === "blocked") return "needs you"
+  if (state === "done") return "done"
+  if (state === "error") return "failed"
   if (state === "idle") return "ready"
   return "unknown"
+}
+
+// The one-line reason a blocked record is waiting, from the protocol's `kind`.
+// Empty when the record carries no recognised kind, so callers fall back to the
+// free-text message instead.
+function kindLabel(kind) {
+  if (kind === "permission") return "needs permission"
+  if (kind === "question") return "has a question"
+  if (kind === "auth") return "needs sign-in"
+  return ""
 }
 
 // ------------------------------------------------------------------ text

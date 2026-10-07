@@ -3,5 +3,9 @@
 *.tmp
 *.log
 
+# python bytecode from bin/muster-tap
+__pycache__/
+*.pyc
+
 # dev-only scenario test; not shipped in the plugin
 /tests/

@@ -123,17 +123,38 @@ Panel {
     readonly property bool hot: hasCursor || mouse.containsMouse
     readonly property bool running: session.state === "working"
     readonly property bool blocked: session.state === "blocked"
+    readonly property bool done: session.state === "done"
+    readonly property bool error: session.state === "error"
+    // A settled state needs the user's eyes too: error is a failure to look at,
+    // done is a result they have not seen.
+    readonly property bool needful: blocked || error
     readonly property bool alive: running || blocked
+    readonly property bool settled: done || error
+
+    // The one-line state detail. `blocked` prefers the protocol's kind (the
+    // reason it is waiting) and falls back to the free-text message; error and
+    // done show the message — what failed, or what finished.
+    readonly property string detail: {
+      if (card.blocked) {
+        var kind = Model.kindLabel(card.session.kind)
+        if (kind !== "" && card.session.message !== "") return kind + " · " + card.session.message
+        if (kind !== "") return kind
+        return card.session.message
+      }
+      if (card.error) return card.session.message !== "" ? card.session.message : "failed"
+      if (card.done) return card.session.message
+      return ""
+    }
 
     // The interior is always the same grey; the state lives on the rim and in
     // the title. Only a working card's rim moves.
     readonly property color cardFill: Qt.rgba(root.contentForeground.r, root.contentForeground.g,
       root.contentForeground.b, hot ? 0.10 : 0.06)
-    readonly property color titleColor: blocked ? root.urgentColor
-      : (running ? root.accentColor : root.contentForeground)
+    readonly property color titleColor: needful ? root.urgentColor
+      : ((running || done) ? root.accentColor : root.contentForeground)
     // The working rim: a lightened, soft theme colour whose opacity follows
     // the panel's shared breathing clock. A blocked card gets the same rim in
-    // the urgent colour, held still.
+    // the urgent colour, held still; a settled one holds the accent.
     readonly property color ringColor: Qt.lighter(root.accentColor, 1.45)
 
     width: parent ? parent.width : implicitWidth
@@ -142,7 +163,7 @@ Panel {
     color: cardFill
     borderSpec: Border.controlSpec(
       hasCursor ? "focus" : (hot ? "hover-cursor" : "normal"),
-      blocked ? root.urgentColor : (running ? root.accentColor : root.contentForeground),
+      needful ? root.urgentColor : ((running || done) ? root.accentColor : root.contentForeground),
       root.accentColor, root.urgentColor)
 
     Rectangle {
@@ -150,11 +171,12 @@ Panel {
       radius: card.radius
       color: "transparent"
       border.width: Math.max(1, Style.space(2))
-      border.color: card.blocked
+      border.color: card.needful
         ? Qt.rgba(root.urgentColor.r, root.urgentColor.g, root.urgentColor.b, 0.85)
-        : Qt.rgba(card.ringColor.r, card.ringColor.g, card.ringColor.b, 0.22 + 0.58 * root.breath)
+        : Qt.rgba(card.ringColor.r, card.ringColor.g, card.ringColor.b,
+            card.settled ? 0.85 : 0.22 + 0.58 * root.breath)
       antialiasing: true
-      visible: card.alive
+      visible: card.alive || card.settled
     }
 
     MouseArea {
@@ -216,13 +238,35 @@ Panel {
       Text {
         textFormat: Text.PlainText
         width: parent.width
-        visible: card.session.state === "blocked" && card.session.message !== ""
-        text: "! " + card.session.message
-        color: root.urgentColor
+        visible: card.detail !== ""
+        text: (card.done ? "✓ " : "! ") + card.detail
+        color: card.done ? root.accentColor : root.urgentColor
         font.bold: true
         font.family: root.contentFontFamily
         font.pixelSize: Style.font.bodySmall
         elide: Text.ElideRight
+      }
+
+      // The protocol's `progress` (0..100) as a thin bar: only when a record
+      // carries one, which is optional.
+      Item {
+        width: parent.width
+        implicitHeight: Style.space(3)
+        visible: card.session.progress >= 0
+
+        Rectangle {
+          anchors.fill: parent
+          radius: height / 2
+          color: Qt.rgba(root.contentForeground.r, root.contentForeground.g,
+            root.contentForeground.b, 0.16)
+        }
+
+        Rectangle {
+          height: parent.height
+          radius: height / 2
+          width: parent.width * Math.max(0, Math.min(1, card.session.progress / 100))
+          color: card.needful ? root.urgentColor : root.accentColor
+        }
       }
 
       Text {
@@ -342,9 +386,11 @@ Panel {
             title: "Muster"
             meta: root.sessions.length === 0
               ? "NOTHING RUNNING"
-              : (root.summary.blocked > 0
-                ? root.summary.blocked + " NEEDS YOU  ·  " + root.summary.working + " WORKING"
-                : root.summary.working + " WORKING  ·  " + root.summary.idle + " READY")
+              : ((root.summary.blocked + root.summary.error) > 0
+                ? (root.summary.blocked + root.summary.error) + " NEEDS YOU  ·  " + root.summary.working + " WORKING"
+                : (root.summary.done > 0
+                  ? root.summary.done + " FINISHED  ·  " + root.summary.working + " WORKING"
+                  : root.summary.working + " WORKING  ·  " + root.summary.idle + " READY"))
           }
 
           Text {

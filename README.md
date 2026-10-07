@@ -43,16 +43,23 @@ one optional root `preview.png`.
 
 ## How it gets state
 
-**Records only.** Agents write one small JSON file per session and the plugin
-watches the directory. The state is never inferred from a window title or a
-process list, and there is no rule engine — nothing that can guess a state
-wrong or silently stop working. (The window id *is* looked up from the parent
-chain when a record is written, but only to make a click focus the right
-terminal; it never decides a session's state.) The bundled pi bridge reports exact `working` / `blocked` / `idle`,
-plus a `completedRuns` counter that makes "a run just finished" unmissable.
+**Reports, never guesses.** Muster speaks the [Program Status Protocol][osc7501]
+(OSC 7501), the terminal-native way for a program to report what it is doing —
+`idle`, `working`, `done`, `blocked`, `error`, with a `kind`, a `progress` and a
+one-line `msg`. An agent either writes one small JSON record per session, which
+the plugin watches, or emits the protocol sequence on its pty, which
+`bin/muster-tap` turns into the same record. The state is never inferred from a
+window title or a process list, and there is no rule engine — nothing that can
+guess a state wrong or silently stop working. (The window id *is* looked up from
+the parent chain when a record is written, but only to make a click focus the
+right terminal; it never decides a session's state.) The bundled pi bridge
+reports the exact states, emits the sequence too, and keeps a `completedRuns`
+counter that makes "a run just finished" unmissable.
 
-Adding an agent is therefore also exact: write records. See
-*Adding another agent* below.
+Adding an agent is therefore also exact: report the state. See *Adding another
+agent* below, and [`docs/osc7501.md`](docs/osc7501.md) for the mapping.
+
+[osc7501]: https://www.superlogical.com/rex/docs/build/program-status
 
 ## Install
 
@@ -191,7 +198,7 @@ the safe `notificationCommand`, uncomment the block below it, and
 
 ```bash
 omarchy-shell shienze.muster status | jq '.details[]'
-# {"agent":"pi","state":"working","folder":"tiny-model-primitives",
+# {"agent":"pi","state":"working","kind":"","progress":-1,"folder":"tiny-model-primitives",
 #  "pid":835161,"completedRuns":3,"window":"0x601dc3f347b0","pane":""}
 ```
 
@@ -225,22 +232,28 @@ One JSON object per session in
 
 | Field | Notes |
 |-------|-------|
-| `schemaVersion` | `1` |
-| `agent` | required; any id works, and omarchy's own aliases (`claude-code`, `oh-my-pi`, `cursor`, …) fold into their canonical agent |
+| `schemaVersion` | `2` (a `1` record still reads) |
+| `agent` | required; the protocol's `app`. Any id works, and omarchy's own aliases (`claude-code`, `oh-my-pi`, `cursor`, …) fold into their canonical agent |
 | `sessionId`, `name`, `cwd`, `project` | identity and display; `project` defaults to the basename of `cwd` |
-| `state` | `working` \| `blocked` \| `idle` \| `unknown` |
-| `message` | shown when `blocked` |
+| `state` | `working` \| `blocked` \| `done` \| `error` \| `idle` \| `unknown` |
+| `kind` | `permission` \| `question` \| `auth`, when `blocked` |
+| `progress` | integer `0`–`100`, or `-1` for absent |
+| `recordId` | the protocol's hierarchical `id` (`build/test`); display only |
+| `message` | the protocol's `msg`; shown when `blocked`, `done` or `error` |
 | `lastPrompt` | shown on the card |
 | `pid` | owning process; also how duplicate records are collapsed |
 | `windowAddress` | Hyprland address; makes the notification's click focus that terminal |
 | `herdrPane` | herdr pane id (`w1:p6`); a herdr session's pane has no window of its own, so a click switches to it with `herdr agent focus` |
-| `updatedAt` | ms epoch; drives staleness (`staleAfterSec`) |
+| `updatedAt` | ms epoch; drives staleness (`staleAfterSec`, `settledAfterSec`) |
 | `completedRuns` | **the alert trigger** — increment once per finished run |
 | `seq` | monotonic writer counter, used to pick the freshest of two records for one pid |
 
-The alert fires on a `completedRuns` **increase**, not on a state change, so a
-short run that goes `working → idle` between two scans still chimes exactly
-once.
+The alert fires when a run finishes: the `completedRuns` counter **increases**,
+or the state **settles** into `done`/`error`. Comparing the counter survives a
+scan interval that missed a fast `working → done` flip; the state edge catches a
+writer that only reports states. A settled record outlives its writer and ages
+on the much longer `settledAfterSec` clock, and focusing it acknowledges it, so
+the card falls back to `idle`.
 
 ## The agents omarchy ships
 
@@ -282,6 +295,32 @@ agent's icon too, since the toast icon is a generated SVG named after the id.
 
 ## Adding another agent
 
+### The protocol way (no hook needed)
+
+If the agent can emit [OSC 7501][osc7501] itself, run it under the pty filter and
+there is nothing else to write:
+
+```bash
+~/.config/omarchy/plugins/shienze.muster/bin/muster-tap --agent claude -- claude
+```
+
+`muster-tap` forwards the agent's output unchanged and turns every report it sees
+into a record, so an agent that already speaks the protocol needs no per-agent
+code. It answers the protocol's support query itself, and removes a live record
+when the agent exits (a `done`/`error` record is left behind).
+
+A hook can also hand the protocol body straight to the writer:
+
+```bash
+printf '%s' "$OSC_BODY" | $report --agent claude --session "$ID" \
+        --osc-fd 0 --emit-osc tty
+```
+
+`--emit-osc tty` mirrors the report back to the terminal, so a terminal that
+shows OSC 7501 (Rex today) lights up as well.
+
+### The record way
+
 `bin/muster-report` is the writer for everything that is not pi:
 
 ```bash
@@ -290,10 +329,15 @@ report=~/.config/omarchy/plugins/shienze.muster/bin/muster-report
 printf '%s' "$PROMPT" | $report --agent claude --session "$SESSION_ID" \
         --state working --name-fd 3 --prompt-fd 0 3<<<"$TITLE"
 printf '%s' "approve" | $report --agent claude --session "$SESSION_ID" \
-        --state blocked --message-fd 0
-$report --agent claude --session "$SESSION_ID" --state idle --completed  # chime + popup
+        --state blocked --kind permission --message-fd 0
+$report --agent claude --session "$SESSION_ID" --state done  # chime + popup
+$report --agent claude --session "$SESSION_ID" --state error
 $report --agent claude --session "$SESSION_ID" --remove
 ```
+
+`--state done` and `--state error` are the settled states: they trigger the
+alert and survive the process. `--state clear` removes the record, like
+`--remove`.
 
 Everything you would otherwise type goes in on a file descriptor —
 `--prompt-fd`, `--message-fd`, `--name-fd`, `--cwd-fd` — never as an argument,
@@ -347,7 +391,8 @@ extension must be TypeScript.
 | `Service.qml`, `BarWidget.qml`, `Panel.qml`, `Record.qml` | QML | omarchy shell (Quickshell, Qt 6), `bash`, `find`, `sort`, `head`, `stat`, `dd`, `mkdir`, `chmod`, `timeout`, `hyprctl`, `head`, `od`, `inotifywait` (optional) |
 | `Model.js` | JavaScript (QML engine) | nothing |
 | `pi/muster.ts` | TypeScript | pi's bundled Bun runtime; node builtins only, zero npm packages |
-| `bin/muster-report` | Bash | `jq`, `flock`, `stat`, `dd`, `mv`, `chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od`, `rm`, `hyprctl` |
+| `bin/muster-report` | Bash | `jq`, `flock`, `stat`, `dd`, `mv`, `chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od`, `base64`, `rm`, `hyprctl` |
+| `bin/muster-tap` | Python 3 | `pty`, `termios`, `select`, `fcntl`, `struct` (all stdlib); optional — only for an agent that emits OSC 7501 with no hook |
 | alerts | — | `paplay` (or `pw-play`/`mpv`) and `omarchy-notification-send` |
 
 `bin/muster-doctor` checks all of these (`--json` for machines) and exits
@@ -357,7 +402,9 @@ optional, not missing: the bridge is only needed if you use pi.
 Rust would not help here. It cannot be a Quickshell plugin or a pi extension,
 so a compiled component could only be a separate daemon with a socket — which
 is the heavy thing this plugin exists to avoid — or a replacement for a
-`jq`+`flock` script on a machine that already ships both.
+`jq`+`flock` script on a machine that already ships both. `bin/muster-tap` is
+Python on purpose: it is a per-session wrapper, not a daemon, and Python's `pty`
+and `termios` are the shortest honest way to filter a terminal.
 
 ## Deliberately out of scope
 
@@ -381,9 +428,11 @@ its own small plugin, not here.
 | `Panel.qml` | session panel and the two toggles |
 | `Record.qml` | one watched session record |
 | `Model.js` | record normalization, ordering, agent names and marks |
-| `pi/muster.ts` | pi → record bridge |
-| `bin/muster-report` | record writer for other agents |
+| `pi/muster.ts` | pi → record + OSC 7501 bridge |
+| `bin/muster-report` | record writer and OSC 7501 front end for other agents |
+| `bin/muster-tap` | optional pty receiver: OSC 7501 on the wire → records |
 | `bin/muster-doctor` | dependency check |
+| `docs/osc7501.md` | how Muster speaks the Program Status Protocol |
 | `assets/` | README screenshots |
 | `preview.png` | root listing card for the marketplace (optional) |
 | `docs/submission-body.md` | the exact issue body for a marketplace listing |

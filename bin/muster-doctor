@@ -174,9 +174,12 @@ else
   record optional "pi bridge" "link pi/muster.ts into $HOME/.pi/agent/extensions/ (only needed for pi)"
 fi
 
-for tool in bash jq flock stat dd mv chmod tr cut date wc awk cat rm head od; do
-  have "$tool" "muster-report writes records with it"
+for tool in bash jq flock stat dd mv chmod tr cut date wc awk cat rm head od base64; do
+  have "$tool" "muster-report writes records and OSC 7501 reports with it"
 done
+# The optional pty receiver: an agent that already emits OSC 7501 needs no hook,
+# only bin/muster-tap, which is Python. Nothing else in the plugin does.
+have python3 "running an OSC 7501 agent with no hook (bin/muster-tap)" optional
 for tool in timeout sort head; do
   have "$tool" "the shell bounds its scans with it"
 done

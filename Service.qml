@@ -118,7 +118,7 @@ Item {
     "  done",
     "  mv -T -f -- \"$tmp\" \"$name.svg\"",
     "}",
-    "mark() { write \"$1\" \"$2\" \"$3\" \"$text\" \"$4\"; write \"$1-working\" \"$2\" \"$3\" \"$accent\" \"$4\"; write \"$1-blocked\" \"$2\" \"$3\" \"$urgent\" \"$4\"; }",
+    "mark() { write \"$1\" \"$2\" \"$3\" \"$text\" \"$4\"; write \"$1-working\" \"$2\" \"$3\" \"$accent\" \"$4\"; write \"$1-blocked\" \"$2\" \"$3\" \"$urgent\" \"$4\"; write \"$1-done\" \"$2\" \"$3\" \"$accent\" \"$4\"; write \"$1-error\" \"$2\" \"$3\" \"$urgent\" \"$4\"; }",
     "mark pi omarchy E901 60",
     "mark opencode omarchy E902 60",
     "mark omp omarchy E903 60",
@@ -163,7 +163,8 @@ Item {
   readonly property bool notifyEnabled: setting("notifyEnabled", true) === true
 
   readonly property int refreshIntervalSec: 2    // fallback rescan cadence; inotifywait makes new records instant
-  readonly property int staleAfterSec: 120       // forget a record whose writer stopped (heartbeat is 30s)
+  readonly property int staleAfterSec: 120       // forget a live record whose writer stopped (heartbeat is 30s)
+  readonly property int settledAfterSec: 21600   // keep a finished (done/error) record for six hours
   readonly property int debounceMs: 2000         // collapse several sessions finishing together
   readonly property int testAlertMinIntervalMs: 1000  // one test alert per second, at most
   readonly property string soundFile: "/usr/share/sounds/freedesktop/stereo/complete.oga"
@@ -173,6 +174,10 @@ Item {
 
   property var recordPaths: []
   property var _seen: ({})
+  // Paths whose settled (done/error) state the user has already looked at by
+  // focusing the session. The protocol leaves "stop showing a finished record"
+  // to the consumer; this is that acknowledgement, held in memory only.
+  property var _acknowledged: ({})
 
   function refresh() {
     if (!listProcess.running) listProcess.running = true
@@ -449,7 +454,17 @@ Item {
       if (!watcher) continue
       var session = Model.normalizeRecord(watcher.record, watcher.path)
       if (!session) continue
-      if (Model.isStale(session, now, root.staleAfterSec)) continue
+      // A settled record the user has focused reads as idle; a live record
+      // clears any earlier acknowledgement so a later finish alerts again.
+      if (Model.isSettled(session.state)) {
+        if (root._acknowledged[session.path] === true) {
+          session.state = "idle"
+          session.kind = ""
+        }
+      } else if (root._acknowledged[session.path] === true) {
+        delete root._acknowledged[session.path]
+      }
+      if (Model.isStale(session, now, root.staleAfterSec, root.settledAfterSec)) continue
       var key = session.pid > 0 ? ("pid:" + session.pid) : ("path:" + session.path)
       var existing = byKey[key]
       if (!existing) {
@@ -483,8 +498,8 @@ Item {
     for (var i = 0; i < list.length; i++) {
       var session = list[i]
       parts.push(JSON.stringify([session.path, session.agent, session.state,
-        session.completedRuns, session.updatedAt, session.name, session.message,
-        session.lastPrompt, session.cwd, session.project]))
+        session.kind, session.progress, session.completedRuns, session.updatedAt,
+        session.name, session.message, session.lastPrompt, session.cwd, session.project]))
     }
     return parts.join("\n")
   }
@@ -504,7 +519,7 @@ Item {
       var before = previous[session.path]
       next[session.path] = { completedRuns: session.completedRuns, state: session.state }
       if (!before) continue
-      if (session.completedRuns > (before.completedRuns || 0)) root.fireAlert(session, now)
+      if (Model.shouldAlert(session, before)) root.fireAlert(session, now)
     }
     root._seen = next
   }
@@ -548,6 +563,12 @@ Item {
   // Left-clicking a panel card jumps to the session's terminal; a notification
   // click runs the same command.
   function focusSession(session) {
+    // Focusing a finished session is the acknowledgement the spec leaves to the
+    // consumer: the card stops reading as "done" and falls back to idle.
+    if (session && session.path && Model.isSettled(session.state)) {
+      root._acknowledged[session.path] = true
+      root.rebuild()
+    }
     var argv = root.focusCommand(session && session.windowAddress, session && session.herdrPane)
     if (argv) Quickshell.execDetached(argv)
   }
@@ -572,12 +593,15 @@ Item {
     var subject = isTest === true ? "Muster  ·  test"
       : "Muster  ·  " + who.label
     var body = isTest === true ? "Test alert"
-      : (session.state === "blocked" ? "Needs your input" : "Run finished")
+      : (session.state === "blocked" ? "Needs your input"
+        : (session.state === "error" ? "Run failed" : "Run finished"))
     var args = ["omarchy-notification-send", "-u", "normal"]
     var mark = String(session.agentIcon || "")
     if (mark !== "" && who.id !== "") {
-      var state = session.state === "working" ? "-working"
-        : (session.state === "blocked" ? "-blocked" : "")
+      // Every settled or live state that has its own mark uses it; unknown and
+      // idle fall back to the plain, un-suffixed mark.
+      var markable = ["working", "blocked", "done", "error"]
+      var state = markable.indexOf(session.state) !== -1 ? "-" + session.state : ""
       args = args.concat(["-i", root.marksDir + "/" + who.id + state + ".svg"])
     }
     args = args.concat([subject, body])

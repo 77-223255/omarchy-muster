@@ -21,12 +21,12 @@
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 const AGENT = "pi";
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const HEARTBEAT_MS = 30000;
 
 function stateBase() {
@@ -338,6 +338,67 @@ function touch(extra) {
 	writeRecord();
 }
 
+// ------------------------------------------------------------- OSC 7501
+//
+// Muster speaks the Program Status Protocol. Alongside the record — which the
+// Omarchy bar reads — pi also writes the same state to its terminal as an
+// OSC 7501 sequence, so any terminal that understands it (Rex today, Ghostty
+// and others later) shows the session too. The spec:
+//   https://www.superlogical.com/rex/docs/build/program-status
+//
+// The write goes straight to /dev/tty rather than through pi's renderer: the
+// sequence is zero-width and a terminal that does not know it ignores it, but
+// going through stdout could still disturb pi's own screen handling. A session
+// with no controlling terminal (print/JSON mode, or a daemon) simply skips it.
+// Every value is a fixed state word, pi's own id, or standard base64, whose
+// alphabet excludes the ':' and ';' that would break out of the sequence.
+const STATE_WORDS = new Set(["idle", "working", "done", "blocked", "error"]);
+let ttyFd = 0;
+
+function tty() {
+	if (ttyFd !== 0) return ttyFd;
+	try {
+		ttyFd = openSync("/dev/tty", "w");
+	} catch {
+		ttyFd = -1;
+	}
+	return ttyFd;
+}
+
+function base64(text) {
+	return Buffer.from(String(text), "utf8").toString("base64");
+}
+
+function emitOsc() {
+	const fd = tty();
+	if (fd < 0 || !record) return;
+	const state = STATE_WORDS.has(record.state) ? record.state : "working";
+	const parts = [`state=${state}`];
+	if (state === "blocked" && record.kind) parts.push(`kind=${record.kind}`);
+	if ((state === "working" || state === "blocked") && record.progress >= 0)
+		parts.push(`progress=${record.progress}`);
+	parts.push(`app=${AGENT}`);
+	if (record.name) parts.push(`title=${base64(record.name)}`);
+	if (record.message) parts.push(`msg=${base64(record.message)}`);
+	try {
+		writeSync(fd, `\x1b]7501;${parts.join(":")}\x1b\\`);
+	} catch {
+		// A report must never break the agent loop.
+	}
+}
+
+// Leaving the terminal: drop the live record the way the protocol says process
+// exit does, and clear it on the terminal so the two stay in step.
+function emitClear() {
+	const fd = tty();
+	if (fd < 0) return;
+	try {
+		writeSync(fd, `\x1b]7501;state=clear:app=${AGENT}\x1b\\`);
+	} catch {
+		// Nothing more to do.
+	}
+}
+
 function startSession(pi, ctx) {
 	try {
 		privateStateDir();
@@ -373,6 +434,9 @@ function startSession(pi, ctx) {
 		cwd,
 		project: basename(cwd).slice(0, 256),
 		state: ctx?.isIdle?.() === false ? "working" : "idle",
+		kind: "",
+		progress: -1,
+		recordId: "",
 		message: "",
 		pid: process.pid,
 		windowAddress: resolveWindow(),
@@ -383,6 +447,7 @@ function startSession(pi, ctx) {
 		seq: 1,
 	};
 	writeRecord();
+	emitOsc();
 
 	if (!heartbeat) {
 		heartbeat = setInterval(() => touch(), HEARTBEAT_MS);
@@ -395,6 +460,7 @@ function stopSession() {
 		clearInterval(heartbeat);
 		heartbeat = null;
 	}
+	emitClear();
 	if (recordFile) {
 		try {
 			rmSync(recordFile, { force: true });
@@ -417,9 +483,24 @@ export default function (pi) {
 		return rootSession && ctx?.mode === "tui";
 	}
 
+	// Every state change publishes to both sinks: the record the bar reads, and
+	// the OSC 7501 sequence the terminal reads. `kind` and `message` are cleared
+	// unless the caller sets them, so a stale permission reason never rides on a
+	// later `working`.
 	function setState(state, extra) {
 		if (!record) return;
-		touch({ state, message: "", ...extra });
+		touch({ state, message: "", kind: "", ...extra });
+		emitOsc();
+	}
+
+	// The protocol's `kind` for a blocking prompt. pi does not label its prompts
+	// with OSC 7501 kinds, so the label is read from the prompt's own words and
+	// otherwise treated as a question — never guessed as `permission`.
+	function promptKind(event) {
+		const hint = `${event?.kind || ""} ${event?.title || ""}`.toLowerCase();
+		if (/auth|login|sign.?in|token|credential/.test(hint)) return "auth";
+		if (/permission|approve|allow|confirm|access/.test(hint)) return "permission";
+		return "question";
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -471,8 +552,8 @@ export default function (pi) {
 	pi.on("ui_prompt_start", async (event, ctx) => {
 		if (!enabled(ctx)) return;
 		uiPrompts += 1;
-		touch({
-			state: "blocked",
+		setState("blocked", {
+			kind: promptKind(event),
 			message: truncate(event?.title || event?.kind || "waiting for input", 120),
 		});
 	});
@@ -486,15 +567,15 @@ export default function (pi) {
 
 	// agent_settled is the only "pi will not continue on its own" signal:
 	// agent_end can still be followed by a retry, compaction, or a queued
-	// follow-up. completedRuns is what makes the watcher alert exactly once.
+	// follow-up. The protocol calls this `done` — a finished run the user has
+	// not seen — which is what makes the alert fire and what survives until the
+	// next prompt. completedRuns is what makes the watcher alert exactly once.
 	pi.on("agent_settled", async (_event, ctx) => {
 		if (!enabled(ctx)) return;
 		if (ctx?.isIdle?.() !== true) return;
 		runActive = false;
 		uiPrompts = 0;
-		touch({
-			state: "idle",
-			message: "",
+		setState("done", {
 			completedRuns: (record?.completedRuns || 0) + 1,
 		});
 	});
