@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -45,7 +46,7 @@ BarWidget {
     return root.horizontal ? marks : marks.slice(0, 1)
   }
 
-  readonly property color chipForeground: bar ? bar.barForeground : Color.foreground
+  readonly property color chipForeground: bar ? bar.barForeground : Commons.Color.foreground
 
   // Every mark carries the state of its own session, the way a panel card puts
   // the state on its rim and title: blocked is the urgent colour, a running
@@ -54,8 +55,8 @@ BarWidget {
   // The chip as a whole still tracks the aggregate (the button's active tint
   // below), so "something needs you" stays visible at a glance.
   function markColor(state) {
-    if (state === "blocked") return bar ? bar.urgent : Color.urgent
-    if (state === "working") return Color.accent
+    if (state === "blocked") return bar ? bar.urgent : Commons.Color.urgent
+    if (state === "working") return Commons.Color.accent
     if (state === "idle") return chipForeground
     return Util.alpha(chipForeground, 0.45)
   }
@@ -199,7 +200,7 @@ BarWidget {
     labelVisible: false
     keepSpace: true
     active: root.anyWorking
-    activeColor: root.anyBlocked ? (root.bar ? root.bar.urgent : Color.urgent) : Color.accent
+    activeColor: root.anyBlocked ? (root.bar ? root.bar.urgent : Commons.Color.urgent) : Commons.Color.accent
     tooltipText: root.tooltip
 
     onPressed: function(b) {

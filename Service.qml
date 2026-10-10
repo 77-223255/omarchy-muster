@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 
 // The single source of truth for agent sessions.
@@ -40,9 +41,9 @@ Item {
   // The marks are ours, so the fill is ours too: they mirror the bar/panel
   // palette — blocked urgent, working accent, idle the notification text
   // colour. (org.freedesktop.Notifications itself has no colour field.)
-  readonly property color notificationText: Color.notifications.text
-  readonly property color notificationAccent: Color.accent
-  readonly property color notificationUrgent: Color.urgent
+  readonly property color notificationText: Commons.Color.notifications.text
+  readonly property color notificationAccent: Commons.Color.accent
+  readonly property color notificationUrgent: Commons.Color.urgent
   onNotificationTextChanged: root.writeMarks()
   onNotificationAccentChanged: root.writeMarks()
   onNotificationUrgentChanged: root.writeMarks()
