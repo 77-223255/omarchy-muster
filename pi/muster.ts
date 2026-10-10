@@ -385,12 +385,15 @@ function startSession(pi, ctx) {
 	// Capped like bin/muster-report: the shell re-reads and re-renders this on
 	// every scan, and a path longer than this is not a path worth showing.
 	const cwd = stripControl(ctx?.cwd || process.cwd() || "").slice(0, 1024);
+	// The file name carries a short hash of the session id, so it cannot collide
+	// with bin/muster-report's `<agent>~<session>.json` or with another id that
+	// sanitises to the same prefix; the bridge is the only writer for it.
 	const sessionKey = sessionId || String(process.pid);
 	recordFile = join(stateDir(), `${AGENT}-${sanitize(sessionKey)}-${shortHash(sessionKey)}.json`);
 	record = {
 		schemaVersion: SCHEMA_VERSION,
 		agent: AGENT,
-		sessionId: (sessionId || String(process.pid)).slice(0, 120),
+		sessionId: stripControl(sessionId || String(process.pid)).slice(0, 120),
 		name,
 		cwd,
 		project: basename(cwd).slice(0, 256),

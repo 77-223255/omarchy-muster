@@ -16,23 +16,31 @@ Item {
   visible: false
 
   property string path: ""
+  property string stateBase: ""
   property var record: null
   property int reloadToken: 0
   property int maxRecordBytes: Model.MAX_RECORD_BYTES
 
-  // -f (stat) rejects a directory, FIFO, socket or device node; !-L (lstat)
-  // rejects a symlink so a record cannot point at another file. dd repeats
-  // the symlink rejection as part of the open with iflag=nofollow — a test
-  // followed by a separate open leaves a window to swap the file — and
-  // iflag=nonblock keeps a special file from ever making the shell wait.
-  // bs+count cap the read even if the file grows after the size check.
+  // The parent chain is re-vetted here the way the scan's list script vets it,
+  // so a directory component swapped for a symlink between the listing and this
+  // read cannot redirect it. The checks are shell builtins (-d, -L, -O, cd), so
+  // this adds no subprocess per read; only stat and dd run, and the caller's
+  // timeout bounds the whole script (previously only dd was wrapped, so a
+  // stalled filesystem could leave reader.running true forever).
   readonly property string readScript: [
     "set -u",
-    "file=\"$1\" cap=\"$2\"",
-    "[ -f \"$file\" ] && [ ! -L \"$file\" ] && [ -O \"$file\" ] || exit 0",
-    "size=$(stat -c %s -- \"$file\" 2>/dev/null) || exit 0",
+    "file=\"$1\" cap=\"$2\" b=\"$3\"",
+    "[[ -n \"$b\" && $file == \"$b\"/* ]] || exit 0",
+    "cd -P -- \"$b\" 2>/dev/null || exit 0",
+    "for c in omarchy muster sessions; do",
+    "  [ -d \"$c\" ] && [ ! -L \"$c\" ] && [ -O \"$c\" ] || exit 0",
+    "  cd -- \"$c\" || exit 0",
+    "done",
+    "name=\"${file##*/}\"",
+    "[ -f \"$name\" ] && [ ! -L \"$name\" ] && [ -O \"$name\" ] || exit 0",
+    "size=$(stat -c %s -- \"$name\" 2>/dev/null) || exit 0",
     "[ \"$size\" -le \"$cap\" ] || exit 0",
-    "exec timeout -k 2 5 dd if=\"$file\" iflag=nofollow,nonblock bs=\"$cap\" count=1 status=none 2>/dev/null"
+    "exec dd if=\"$name\" iflag=nofollow,nonblock bs=\"$cap\" count=1 status=none 2>/dev/null"
   ].join("\n")
 
   function parse(content) {
@@ -58,7 +66,8 @@ Item {
   Process {
     id: reader
     running: false
-    command: ["bash", "-c", root.readScript, "muster-read", root.path, String(root.maxRecordBytes)]
+    command: ["timeout", "-k", "2", "5", "bash", "-c", root.readScript, "muster-read",
+      root.path, String(root.maxRecordBytes), root.stateBase]
 
     stdout: StdioCollector {
       waitForEnd: true

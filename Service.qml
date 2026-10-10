@@ -149,6 +149,9 @@ Item {
   }
 
   property bool _setupDone: false
+  property int _setupAttempts: 0
+  property bool _watchPending: false
+  property string _watchDirId: ""
   property bool _marksPending: false
 
   // Normalized, sorted sessions. Reassigned wholesale on every change so QML
@@ -208,14 +211,27 @@ Item {
         if (watcher && String(watcher.path) === path) watcher.reloadToken++
       }
     }
-    root.refresh()
+    // Events can arrive far faster than a scan can run; coalesce the scan
+    // through a short timer rather than spawning find|sort|head per event.
+    root._watchPending = true
+  }
+
+  // Creates and vets the state directory chain. Retried a bounded number of
+  // times so a transient failure, or a symlink a same-user writer planted, does
+  // not strand the plugin for the rest of the session; the exit handler decides
+  // whether the attempt succeeded.
+  function startSetup() {
+    if (root._setupDone || mkdirProcess.running) return
+    if (root._setupAttempts >= 4) return
+    root._setupAttempts += 1
+    mkdirProcess.running = true
   }
 
   Component.onCompleted: {
     // mkdirProcess owns the directory chain and creates it with umask 077;
     // the first scan and the marks both start from its exit handler, so
     // nothing here runs under a different umask or against a missing path.
-    mkdirProcess.running = true
+    root.startSetup()
   }
 
   // Creates and vets the two directories the plugin owns, one level at a time.
@@ -316,6 +332,9 @@ Item {
     "step omarchy || exit 1",
     "step muster || exit 1",
     "step sessions || exit 1",
+    "# The vetted directory's identity, so the service can notice a later swap or",
+    "# recreation and restart its inotify watch instead of watching a dead inode.",
+    "printf '#dir %s\\n' \"$(stat -c '%d:%i' . 2>/dev/null)\"",
     "find -- . -maxdepth 1 -type f -name '*.json' ! -name $'*\\n*' -printf '%T@\\t%s\\t%f\\n' 2>/dev/null | sort -k1,1nr | head -n 256"
   ].join("\n")
 
@@ -328,7 +347,13 @@ Item {
     // once it exists — the first write on a fresh install would otherwise race
     // the directory's creation. Only watch the directory once it is ours.
     onExited: function(exitCode) {
-      if (exitCode !== 0) return
+      if (exitCode !== 0) {
+        // A refused symlinked component or a transient failure must not strand
+        // the plugin for the whole session; retry a bounded number of times.
+        if (root._setupAttempts < 4) setupRetry.restart()
+        else console.warn("muster", "state directory setup failed after retries; session monitoring is off until the next shell restart")
+        return
+      }
       root._setupDone = true
       inotifyProbe.running = true
       root.writeMarks()
@@ -389,6 +414,25 @@ Item {
   }
 
   Timer {
+    id: setupRetry
+    interval: 5000
+    onTriggered: root.startSetup()
+  }
+
+  Timer {
+    // One scan per burst of watch events, not one per event.
+    interval: 250
+    running: true
+    repeat: true
+    onTriggered: {
+      if (root._watchPending) {
+        root._watchPending = false
+        root.refresh()
+      }
+    }
+  }
+
+  Timer {
     interval: root.refreshIntervalSec * 1000
     running: true
     repeat: true
@@ -436,9 +480,11 @@ Item {
     var paths = []
     var mtimes = {}
     var lines = String(output || "").split("\n")
+    var dirId = ""
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
       if (line === "") continue
+      if (line.indexOf("#dir ") === 0) { dirId = line.slice(5); continue }
       // Fixed fields: mtime, size, name. The name is last and may contain a
       // tab, so the first two tabs are the only separators; nothing in a file
       // name can shift where the sort key (mtime) was read from.
@@ -453,6 +499,15 @@ Item {
       mtimes[path] = line.slice(0, t1) + "\t" + line.slice(t1 + 1, t2)
     }
     paths.sort()
+
+    // A directory replaced after the watch started leaves inotifywait on a dead
+    // inode (it does not exit, so watchRetry never fires). Restart the watch
+    // when the vetted identity moves; the scan above is the fallback meanwhile.
+    if (dirId !== "" && root._watchDirId !== "" && dirId !== root._watchDirId && watchProcess.running) {
+      watchProcess.running = false
+      watchRetry.restart()
+    }
+    if (dirId !== "") root._watchDirId = dirId
 
     var previous = root._mtimes
     var pathsChanged = JSON.stringify(paths) !== JSON.stringify(root.recordPaths)
@@ -475,6 +530,7 @@ Item {
     delegate: Record {
       required property var modelData
       path: modelData
+      stateBase: Model.stateBase(Quickshell.env("XDG_STATE_HOME") || "", root.home)
       onRecordChanged: root.rebuild()
     }
 
@@ -538,6 +594,9 @@ Item {
   // ------------------------------------------------------------- alerts
 
   property real _lastAlertAt: 0
+  property var _alertTimes: []
+  readonly property int alertBurstLimit: 10
+  readonly property int alertBurstWindowMs: 60000
 
   // A record counts as "finished a run" when its completedRuns counter grows.
   // Comparing counters instead of states survives a scan interval that missed
@@ -556,7 +615,16 @@ Item {
   }
 
   function fireAlert(session, now) {
+    // The debounce collapses sessions that finish together; the rolling cap
+    // stops a same-UID writer that keeps growing a record's completedRuns from
+    // turning the alert into a sustained notification and sound stream.
     if (now - root._lastAlertAt < root.debounceMs) return
+    var recent = []
+    for (var i = 0; i < root._alertTimes.length; i++)
+      if (now - root._alertTimes[i] < root.alertBurstWindowMs) recent.push(root._alertTimes[i])
+    if (recent.length >= root.alertBurstLimit) return
+    recent.push(now)
+    root._alertTimes = recent
     root._lastAlertAt = now
     if (root.soundEnabled) root.playSound()
     if (root.notifyEnabled) Quickshell.execDetached(root.notificationCommand(session))
@@ -627,6 +695,13 @@ Item {
       subject = "Muster  ·  " + who.label
       body = session.state === "blocked" ? "Needs your input" : "Run finished"
     }
+    // omarchy-notification-send only treats a dash-leading description as text
+    // when it is not one of its option flags. A body that is exactly `--image=…`
+    // (or `-i`, `-g`, …) would otherwise be parsed as that option, and `--image`
+    // makes the notification service read the named path. A leading space keeps
+    // such a body a description; every other field here is already a constant
+    // or a sanitised id that cannot start with a dash.
+    if (body.charAt(0) === "-") body = " " + body
     var args = ["omarchy-notification-send", "-u", "normal"]
     var mark = String(session.agentIcon || "")
     if (mark !== "" && who.id !== "") {

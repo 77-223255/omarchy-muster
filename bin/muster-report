@@ -251,7 +251,10 @@ require_owned_chain "$state_dir"
 [[ -d $state_dir && ! -L $state_dir && -O $state_dir ]] ||
   fail "$state_dir is not a directory owned by this user"
 
-record_name="$(sanitize "$agent")-$(sanitize "$session").json"
+# `~` cannot appear in a sanitised component (sanitize maps everything outside
+# [a-zA-Z0-9._-] to `_`), so the join is unambiguous: `a-b` + `c` and `a` +
+# `b-c` no longer both publish to `a-b-c.json`.
+record_name="$(sanitize "$agent")~$(sanitize "$session").json"
 file="$state_dir/$record_name"
 # Once lock_dir holds fd 9, every read and write addresses the record through
 # that descriptor rather than through the path: /proc/self/fd/9/<name> resolves

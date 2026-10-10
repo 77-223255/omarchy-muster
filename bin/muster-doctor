@@ -16,6 +16,9 @@ json=0
 
 plugin_dir=${MUSTER_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/shienze.muster}
 state_base=${XDG_STATE_HOME:-$HOME/.local/state}
+# The writers refuse a relative XDG_STATE_HOME. A doctor that audited one would
+# report on a directory the plugin never uses, a false all-green.
+[[ $state_base == /* ]] || { echo "muster-doctor: XDG_STATE_HOME must be an absolute path (got: $state_base)" >&2; exit 2; }
 state_dir="$state_base/omarchy/muster/sessions"
 marks_dir="$state_base/omarchy/muster/marks"
 pi_extension=$HOME/.pi/agent/extensions/muster.ts
