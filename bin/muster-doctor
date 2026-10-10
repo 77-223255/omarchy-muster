@@ -28,13 +28,26 @@ rows=()
 # Anything printed may derive from a record another integration wrote, so it is
 # stripped of control bytes first: a terminal executes ANSI/OSC sequences, and a
 # record's project name can carry them.
+# Anything printed may derive from a record another integration wrote, so it is
+# stripped of control and format code points first: a terminal executes
+# ANSI/OSC sequences, and a record's project name can carry them. tr removes C0
+# and DEL; sed removes the UTF-8-encoded C1 and bidi ranges as whole sequences,
+# because a byte range over 0x7f-0x9f would eat the continuation bytes of
+# ordinary multi-byte text and corrupt it.
 clean() {
-  printf '%s' "$1" | tr -d '\000-\037\177-\237'
+  printf '%s' "$1" | tr -d '\000-\037\177' | LC_ALL=C sed \
+    -e 's/\xc2[\x80-\x9f]//g' \
+    -e 's/\xe2\x80[\x8b-\x8f\xaa-\xae]//g' \
+    -e 's/\xe2\x81[\xa6-\xa9]//g' \
+    -e 's/\xd8\x9c//g' \
+    -e 's/\xef\xbb\xbf//g'
 }
 
 record() {
   # record <status> <name> <detail>
-  rows+=("$1|$2|$(clean "$3")")
+  # Unit Separator, not a pipe: the detail is untrusted text and may contain a
+  # pipe, which the JSON split below would otherwise truncate.
+  rows+=("$1"$'\x1f'"$2"$'\x1f'"$(clean "$3")")
   case $1 in
   ok) ok=$((ok + 1)) ;;
   missing) missing=$((missing + 1)) ;;
@@ -174,7 +187,7 @@ else
   record optional "pi bridge" "link pi/muster.ts into $HOME/.pi/agent/extensions/ (only needed for pi)"
 fi
 
-for tool in bash jq flock stat dd mv chmod tr cut date wc awk cat rm head od; do
+for tool in bash jq flock stat dd mv chmod tr cut date wc awk cat rm head od sed; do
   have "$tool" "muster-report writes records with it"
 done
 for tool in timeout sort head; do
@@ -212,14 +225,14 @@ fi
 
 if ((json)); then
   printf '%s\n' "${rows[@]}" | jq -Rn '
-    [inputs | split("|") | {status: .[0], name: .[1], detail: .[2]}]
+    [inputs | split("\u001f") | {status: .[0], name: .[1], detail: .[2]}]
     | {ok: (map(select(.status == "ok")) | length),
        optional: (map(select(.status == "optional")) | length),
        missing: (map(select(.status == "missing")) | length),
        checks: .}'
 else
   for row in "${rows[@]}"; do
-    IFS='|' read -r status name detail <<<"$row"
+    IFS=$'\x1f' read -r status name detail <<<"$row"
     case $status in
     ok) printf '  \033[32m✓\033[0m %-22s %s\n' "$name" "$detail" ;;
     missing) printf '  \033[31m✗\033[0m %-22s %s\n' "$name" "$detail" ;;

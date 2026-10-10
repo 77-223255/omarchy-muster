@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "shienze.muster",
   "name": "Muster",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "author": "shienze",
   "license": "MIT",
   "description": "Live status for local coding agents in the Omarchy bar, with a completion sound and notification.",
@@ -21,11 +21,13 @@
     "defaultSection": "left",
     "defaults": {
       "soundEnabled": true,
-      "notifyEnabled": true
+      "notifyEnabled": true,
+      "notifyContent": false
     },
     "schema": [
       { "key": "soundEnabled", "type": "boolean", "label": "Play a sound when a run finishes", "defaultValue": true },
-      { "key": "notifyEnabled", "type": "boolean", "label": "Send a desktop notification when a run finishes", "defaultValue": true }
+      { "key": "notifyEnabled", "type": "boolean", "label": "Send a desktop notification when a run finishes", "defaultValue": true },
+      { "key": "notifyContent", "type": "boolean", "label": "Include the session title and last prompt in notifications (visible to other local users via process arguments and the notification log)", "defaultValue": false }
     ]
   }
 }

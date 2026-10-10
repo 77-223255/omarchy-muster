@@ -29,7 +29,7 @@ Item {
   readonly property string readScript: [
     "set -u",
     "file=\"$1\" cap=\"$2\"",
-    "[ -f \"$file\" ] && [ ! -L \"$file\" ] || exit 0",
+    "[ -f \"$file\" ] && [ ! -L \"$file\" ] && [ -O \"$file\" ] || exit 0",
     "size=$(stat -c %s -- \"$file\" 2>/dev/null) || exit 0",
     "[ \"$size\" -le \"$cap\" ] || exit 0",
     "exec timeout -k 2 5 dd if=\"$file\" iflag=nofollow,nonblock bs=\"$cap\" count=1 status=none 2>/dev/null"
@@ -68,6 +68,17 @@ Item {
           root.pending = false
           root.read()
         }
+      }
+    }
+
+    // A reload can arrive while the read is still finishing. StdioCollector's
+    // onStreamFinished can fire before `running` flips false, so the pending
+    // flag must also be consumed here — otherwise the last write before a
+    // writer goes quiet is never re-read and the card stays stale.
+    onExited: {
+      if (root.pending) {
+        root.pending = false
+        root.read()
       }
     }
   }

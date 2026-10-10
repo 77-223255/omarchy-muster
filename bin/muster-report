@@ -167,6 +167,24 @@ read_fd() {
 [[ -n $name_fd ]] && name=$(read_fd "$name_fd" 80)
 [[ -n $cwd_fd ]] && cwd=$(read_fd "$cwd_fd" 1024)
 
+# C0/C1 control bytes (plus the bidi/format code points) are stripped at
+# write time, matching Model.js's printable(). tr removes C0 and DEL safely;
+# sed removes the UTF-8-encoded C1 and format ranges as whole sequences —
+# a byte-range tr over 0x7f-0x9f would also eat the continuation bytes of
+# ordinary multi-byte text (文 is e6 96 87) and corrupt it.
+strip_control() {
+  printf '%s' "$1" | tr -d '\000-\037\177' | LC_ALL=C sed \
+    -e 's/\xc2[\x80-\x9f]//g' \
+    -e 's/\xe2\x80[\x8b-\x8f\xaa-\xae]//g' \
+    -e 's/\xe2\x81[\xa6-\xa9]//g' \
+    -e 's/\xd8\x9c//g' \
+    -e 's/\xef\xbb\xbf//g'
+}
+prompt=$(strip_control "$prompt")
+message=$(strip_control "$message")
+name=$(strip_control "$name")
+cwd=$(strip_control "$cwd")
+
 sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
 
 # ------------------------------------------------------------- state paths
@@ -181,7 +199,7 @@ MAX_RECORD_BYTES=65536
 # link, wait on a special file, or allocate without bound.
 read_record() {
   local f="$1" size
-  [[ -f $f && ! -L $f ]] || return 0
+  [[ -f $f && ! -L $f && -O $f ]] || return 0
   size=$(stat -c %s -- "$f" 2>/dev/null) || return 0
   [[ $size =~ ^[0-9]+$ && $size -le $MAX_RECORD_BYTES ]] || return 0
   dd if="$f" iflag=nofollow,nonblock bs="$MAX_RECORD_BYTES" count=1 status=none 2>/dev/null || true
@@ -283,7 +301,7 @@ resolve_window() {
   done
   (( ${#chain[@]} > 0 )) || return 0
   local clients
-  clients=$(hyprctl -j clients 2>/dev/null) || return 0
+  clients=$(timeout 2 hyprctl -j clients 2>/dev/null) || return 0
 
   local pid matches="" count=0
   for pid in "${chain[@]}"; do
@@ -300,7 +318,7 @@ resolve_window() {
     # herdr runs its panes under a daemon, so no ancestor owns a window. The
     # report comes from the herdr UI, so the focused window is the one to use.
     [[ -n $herdr_pane ]] || return 0
-    hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null || true
+    timeout 2 hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null || true
     return 0
   fi
 
@@ -313,7 +331,7 @@ resolve_window() {
   # window, so the parent chain cannot tell them apart. Prefer the focused
   # window, then the most recently focused one.
   local focused address
-  focused=$(hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null)
+  focused=$(timeout 2 hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null)
   address=$(jq -r --rawfile f <(printf '%s' "$focused") \
     '.[] | select(.address == $f) | .address' <<<"$matches" 2>/dev/null | head -n1)
   if [[ -n $address && $address != null ]]; then
@@ -329,6 +347,10 @@ none) ;;
 auto) window_address=$(resolve_window "$pid" || true) ;;
 *) window_address="$window" ;;
 esac
+# resolve_window returns compositor data read back from hyprctl, and the manual
+# value was already held to this regex. Re-check the resolved one too, so the
+# single field that rides back into hyprctl can only ever be a plain address.
+[[ $window_address =~ ^0x[0-9a-fA-F]{1,16}$ ]] || window_address=""
 
 # ------------------------------------------------------------ read/modify
 
@@ -356,7 +378,10 @@ old=$(read_record "$dir_ref/$record_name")
 # record; anything else is treated as no previous record at all.
 jq -e 'type == "object"' >/dev/null 2>&1 <<<"$old" || old='{}'
 
-now=$(date +%s%3N)
+now=$(date +%s%3N 2>/dev/null)
+# +%s%3N is GNU-specific; on a date(1) that prints it literally the writer would
+# abort under set -e. Fall back to whole seconds so the timestamp stays numeric.
+[[ $now =~ ^[0-9]+$ ]] || now=$(( $(date +%s) * 1000 ))
 # Pure shell on purpose: basename(1) is an external process, and the working
 # directory would appear on its command line — world-readable through
 # /proc/<pid>/cmdline, which is exactly what the descriptor options above

@@ -270,6 +270,7 @@ Panel {
     Text {
       anchors.centerIn: parent
       text: tile.label
+      textFormat: Text.PlainText
       color: tile.checked
         ? (root.bar && root.bar.background ? root.bar.background : Commons.Color.background)
         : root.contentForeground
@@ -352,6 +353,7 @@ Panel {
             width: parent.width
             visible: root.sessions.length === 0
             text: "No agent sessions.\nRecords are read from ~/.local/state/omarchy/muster/sessions/ — an agent appears here once its bridge or hook writes one."
+            textFormat: Text.PlainText
             color: root.dimColor
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.bodySmall
