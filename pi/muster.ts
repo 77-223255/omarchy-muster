@@ -235,6 +235,26 @@ function herdrPane() {
 	return /^[A-Za-z0-9:_.-]{1,64}$/.test(pane) ? pane : "";
 }
 
+// The tmux pane pi runs in, read from the environment tmux injects. Empty when
+// pi is not inside tmux. tmux writes the id as '%' followed by digits, and a
+// value from anywhere else is dropped rather than written to the record, so
+// only a shape tmux itself produces can reach the click command.
+function tmuxPane() {
+	const pane = String(process.env.TMUX_PANE || "");
+	return /^%[0-9]{1,6}$/.test(pane) ? pane : "";
+}
+
+// The tmux server socket, the first field of $TMUX
+// ("<socket>,<pid>,<session>"). Empty means the default server. Only a plain
+// absolute path is kept; a socket that is not one is dropped, because the pane
+// id alone still focuses the default server while a stray string would ride
+// into the click command.
+function tmuxSocket() {
+	if (tmuxPane() === "") return "";
+	const socket = String(process.env.TMUX || "").split(",")[0];
+	return /^\/[A-Za-z0-9._/-]{0,255}$/.test(socket) ? socket : "";
+}
+
 function resolveWindow() {
 	try {
 		const raw = execFileSync("hyprctl", ["-j", "clients"], {
@@ -252,9 +272,11 @@ function resolveWindow() {
 			}
 		}
 		if (matches.length === 0) {
-			// Herdr panes have no terminal window in their ancestry. The prompt
-			// was submitted from the herdr UI, so the focused window is it.
-			return herdrPane() !== "" ? activeWindowAddress() : "";
+			// A multiplexer pane has no terminal window in its ancestry: herdr
+			// panes are parented to the herdr server, a tmux pane to the tmux
+			// server. The prompt was submitted from the client, so the focused
+			// window is it.
+			return herdrPane() !== "" || tmuxPane() !== "" ? activeWindowAddress() : "";
 		}
 		if (matches.length === 1) return String(matches[0].address || "");
 		// A single-instance terminal (ghostty, kitty) reports one pid for every
@@ -402,6 +424,8 @@ function startSession(pi, ctx) {
 		pid: process.pid,
 		windowAddress: validWindowAddress(resolveWindow()),
 		herdrPane: herdrPane(),
+		tmuxPane: tmuxPane(),
+		tmuxSocket: tmuxSocket(),
 		updatedAt: Date.now(),
 		completedRuns: 0,
 		lastPrompt: truncate(lastUserPrompt(ctx), 240),
@@ -484,6 +508,8 @@ export default function (pi) {
 			lastPrompt: truncate(event?.prompt, 240),
 			windowAddress: validWindowAddress(resolveWindow()),
 			herdrPane: herdrPane(),
+			tmuxPane: tmuxPane(),
+			tmuxSocket: tmuxSocket(),
 		});
 	});
 

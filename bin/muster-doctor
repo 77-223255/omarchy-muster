@@ -224,6 +224,16 @@ else
   have herdr "switching to a session's herdr pane on click" optional
 fi
 
+# tmux keeps its panes under a server, so a click needs its CLI to switch the
+# attached client back to the pane; only sessions inside tmux use it. There is no
+# reliable way to detect that from outside a pane, so it is required only when
+# this very run is inside tmux.
+if [[ -n ${TMUX:-} ]]; then
+  have tmux "switching to a session's tmux pane on click" required
+else
+  have tmux "switching to a session's tmux pane on click" optional
+fi
+
 # ---------------------------------------------------------------- output
 
 if ((json)); then

@@ -637,32 +637,51 @@ Item {
       Quickshell.execDetached([root.soundPlayer, root.soundFile])
   }
 
-  // The argv that focuses the session. A session is addressable two ways: a
-  // Hyprland window (any plain terminal) and, inside herdr, a pane. herdr runs
-  // its panes under a daemon, so the pane process has no terminal window in its
-  // ancestry — the window shown is the herdr client's, and the pane is moved to
-  // with `herdr agent focus`. Run the pane switch first, then bring the window
-  // forward. Hyprland >= 0.56 with a Lua config reads `dispatch` as Lua and
-  // rejects the classic `focuswindow address:…`, so try the Lua form first and
-  // fall back — the same pair omarchy-launch-or-focus uses. Both values go in as
-  // positional data, never as shell source. The address *is* placed inside the
-  // Lua string below, so its safety rests on the hex-only test right above it,
-  // and the pane on the id test — both are enforced again in Model.js.
-  function focusCommand(address, pane) {
+  // The argv that focuses the session. A session is addressable three ways: a
+  // Hyprland window (any plain terminal), and inside a multiplexer, a pane.
+  // herdr runs its panes under a daemon, so the pane process has no terminal
+  // window in its ancestry — the window shown is the herdr client's, and the
+  // pane is moved to with `herdr agent focus`. tmux keeps the pane under its
+  // own server, so the window is the attached client's and the pane is reached
+  // with `tmux switch-client`. Move the multiplexer first, then bring the
+  // window forward. Hyprland >= 0.56 with a Lua config reads `dispatch` as Lua
+  // and rejects the classic `focuswindow address:…`, so try the Lua form first
+  // and fall back — the same pair omarchy-launch-or-focus uses. Every value
+  // goes in as positional data, never as shell source: `$1` the address, `$2`
+  // the herdr pane, `$3` the tmux pane, `$4` the tmux socket. The address *is*
+  // placed inside the Lua string below, so its safety rests on the hex-only
+  // test right above it, and each pane on its own id test — all enforced again
+  // in Model.js.
+  function focusCommand(address, herdrPane, tmuxPane, tmuxSocket) {
+    // Every step is bounded: the click runs detached, so a wedged compositor,
+    // multiplexer or tmux server must not leave a stray process behind. Each
+    // call ends in `|| true` because one surface being unavailable must not
+    // stop the others.
     var steps = []
-    if (/^[A-Za-z0-9:_.-]{1,64}$/.test(String(pane || "")))
-      steps.push('herdr agent focus -- "$2" >/dev/null 2>&1 || true')
+    if (/^[A-Za-z0-9:_.-]{1,64}$/.test(String(herdrPane || "")))
+      steps.push('timeout 2 herdr agent focus -- "$2" >/dev/null 2>&1 || true')
+    // `select-window`/`select-pane` set the session's active window and pane
+    // (they work with no client attached); `switch-client -t %N` then moves an
+    // attached client to that session, window and pane. The order matters: a
+    // failing tmux command aborts the rest of a `\;`-joined list, so the only
+    // one that can fail without a client — switch-client — goes last, after the
+    // selects have already pointed the session at the pane.
+    if (/^%[0-9]{1,6}$/.test(String(tmuxPane || ""))) {
+      var server = /^\/[A-Za-z0-9._\/-]{0,255}$/.test(String(tmuxSocket || "")) ? ' -S "$4"' : ""
+      steps.push('timeout 2 tmux' + server + ' select-window -t "$3" \\; select-pane -t "$3" \\; switch-client -t "$3" >/dev/null 2>&1 || true')
+    }
     if (/^0x[0-9a-fA-F]{1,16}$/.test(String(address || "")))
-      steps.push('hyprctl dispatch "hl.dsp.focus({ window = \\"address:$1\\" })" || hyprctl dispatch focuswindow "address:$1"')
+      steps.push('timeout 2 hyprctl dispatch "hl.dsp.focus({ window = \\"address:$1\\" })" || timeout 2 hyprctl dispatch focuswindow "address:$1"')
     if (steps.length === 0) return null
     return ["bash", "-c", steps.join("\n"), "muster-focus",
-      String(address || ""), String(pane || "")]
+      String(address || ""), String(herdrPane || ""), String(tmuxPane || ""), String(tmuxSocket || "")]
   }
 
   // Left-clicking a panel card jumps to the session's terminal; a notification
   // click runs the same command.
   function focusSession(session) {
-    var argv = root.focusCommand(session && session.windowAddress, session && session.herdrPane)
+    var argv = root.focusCommand(session && session.windowAddress, session && session.herdrPane,
+      session && session.tmuxPane, session && session.tmuxSocket)
     if (argv) Quickshell.execDetached(argv)
   }
 
@@ -711,7 +730,8 @@ Item {
     }
     args = args.concat([subject, body])
     // Clicking the notification jumps to the terminal that produced it.
-    var focus = root.focusCommand(session.windowAddress, session.herdrPane)
+    var focus = root.focusCommand(session.windowAddress, session.herdrPane,
+      session.tmuxPane, session.tmuxSocket)
     if (focus) args = args.concat(["--exec"]).concat(focus)
     return args
   }
