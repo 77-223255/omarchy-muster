@@ -598,6 +598,10 @@ export default function (pi) {
 		// TUI only: print/JSON runs have no terminal for the panel to focus,
 		// and RPC reports a UI while still being headless.
 		if (ctx?.mode !== "tui") return;
+		// A pty tap owns the session when it is in the path: pi reports the
+		// protocol natively, the tap turns that into the record, and a bridge
+		// record here would be a second card for the same run.
+		if (process.env.MUSTER_TAP === "1") return;
 		rootSession = true;
 		runActive = false;
 		uiPrompts = 0;

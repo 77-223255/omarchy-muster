@@ -22,7 +22,7 @@ agent plugin. The shell side uses `bash`, `find`, `sort`, `head`, `stat`, `dd`,
 `mkdir`, `chmod` and `timeout`, plus `inotifywait` when it is
 installed; the
 record writer `bin/muster-report` uses `jq`, `flock`, `dd`, `stat`, `mv`,
-`chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od`, `sed`, `base64` and `rm`; focusing a session uses
+`chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od`, `sed`, `base64`, `sha1sum` and `rm`; focusing a session uses
 `hyprctl` and, inside a multiplexer, `herdr` or `tmux`; alerts use `paplay` and
 `omarchy-notification-send`. The optional pty receiver `bin/muster-tap` is
 Python 3 (standard library only). All of them are common desktop tools, and the

@@ -61,6 +61,9 @@
 # come from `app=` in the OSC body.
 
 set -euo pipefail
+# The wire and the file name are byte-oriented: the value charset, the space
+# trimming, the caps and the digests must not change with the user's locale.
+export LC_ALL=C
 
 # A record carries the last user prompt and the working directory, so nothing
 # this script creates may be readable by another local user. umask 077 makes
@@ -224,18 +227,44 @@ fi
 
 # Free text and paths never reach a file name directly: a session id becomes
 # `<agent>~<session>.json`, so it is reduced to a plain, path-safe token first.
-sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
+sanitize() { local v="${1//[^a-zA-Z0-9._-]/_}"; printf '%s' "${v:0:80}"; }
 
 # The session of a report that carries an id names the record file, so it has
 # to be a short plain token: a protocol id can be 263 bytes long and a file
 # name cannot be that. The raw id stays in the record as recordId, so nothing
-# is lost but the name.
+# is lost but the name. The digest is ALWAYS appended: sanitising maps `/` to
+# `_` and truncation cuts, so without it two different ids could name the same
+# file and one program could overwrite another program's record. The empty id
+# is the root record; it is scoped by the terminal id (or the writer pid) so
+# id-less reports from two processes do not collide either.
+hash_id() { printf '%s' "$1" | sha1sum | cut -c1-16; }
+
 osc_session() {
-  local token
-  token=$(sanitize "$1" | cut -c1-64)
+  local raw="$1" token digest
+  if [[ -z $raw ]]; then
+    # The root record is one per terminal. Without a terminal id the caller
+    # must supply --session (checked above); a bare "root" is used only for
+    # that explicit single-session case, not to guess a scope from the pid.
+    if [[ -n $terminal_id ]]; then
+      printf 'root-%s' "$(hash_id "root:$terminal_id")"
+    else
+      printf 'root'
+    fi
+    return 0
+  fi
+  token=$(sanitize "$raw" | cut -b1-40)
   # An id of the shape the session uses starts with a letter or a digit.
-  [[ $token =~ ^[A-Za-z0-9] ]] || token="id${token:0:62}"
-  printf '%s' "$token"
+  [[ $token =~ ^[A-Za-z0-9] ]] || token="id${token:0:38}"
+  # The digest is scoped by the terminal id when there is one: two taps that
+  # report the same id are two records. Without one, the raw id is the only
+  # stable identity a hook has, so hash that alone. A digest is uniqueness,
+  # not a secret: any same-user writer can still forge a record.
+  if [[ -n $terminal_id ]]; then
+    digest=$(hash_id "term:$terminal_id:$raw")
+  else
+    digest=$(hash_id "$raw")
+  fi
+  printf '%s-%s' "$token" "$digest"
 }
 
 [[ -z $prompt_fd || $prompt_fd =~ ^[0-9]+$ ]] ||
@@ -270,16 +299,6 @@ OSC_MAX_TITLE_DEC=192
 OSC_MAX_MSG_ENC=2732
 OSC_MAX_MSG_DEC=2048
 
-# Trim the whitespace around a key or a value — never inside one. The spec
-# removes the whitespace around a key and a value; a space inside a value is
-# outside the wire charset, so such a pair is malformed, not a value with
-# the space taken out.
-trim_space() {
-  local s="$1"
-  s="${s#"${s%%[![:space:]]*}"}"
-  s="${s%"${s##*[![:space:]]}"}"
-  printf '%s' "$s"
-}
 
 # Decode a protocol free-text value: standard base64 of UTF-8, padding
 # optional. The spec's rule is all-or-nothing, so a value that does not
@@ -307,6 +326,9 @@ osc_decode() {
   # A NUL byte cannot live in a shell variable — it is dropped on the way in
   # — so a string shorter than the raw decode means that one was there.
   ((raw == $(printf '%s' "$decoded" | wc -c))) || return 1
+  # A lone C1 byte is not valid UTF-8; iconv rejects it, and the two-byte
+  # U+0080-U+009F forms are caught below.
+  printf '%s' "$decoded" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || return 1
   [[ $decoded != *[[:cntrl:]]* ]] || return 1
   # The C1 controls (U+0080-U+009F) are two-byte sequences in UTF-8, so the
   # class above never sees them: they are matched as bytes.
@@ -314,7 +336,7 @@ osc_decode() {
   printf '%s' "$decoded"
 }
 
-osc_state="" osc_kind="" osc_progress="" osc_app="" osc_id=""
+osc_state="" osc_kind="" osc_progress="" osc_app="" osc_id="" osc_id_seen=0 osc_id_bad=0
 osc_title="" osc_msg="" osc_title_text="" osc_msg_text=""
 
 if [[ -n $osc_fd ]]; then
@@ -351,22 +373,30 @@ if [[ -n $osc_fd ]]; then
     [[ $osc_pair == *=* ]] || continue
     key=${osc_pair%%=*}
     val=${osc_pair#*=}
-    # The spec removes whitespace around keys and values.
-    key=$(trim_space "$key")
-    val=$(trim_space "$val")
+    # The spec removes whitespace around keys and values. Parameter expansion,
+    # not a command substitution: a 4 KiB body can hold ~800 pairs and two
+    # forks per pair was a self-inflicted fork bomb.
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    val="${val#"${val%%[![:space:]]*}"}"
+    val="${val%"${val##*[![:space:]]}"}"
     # A key is 1..16 lowercase letters; anything else is not a key.
     ((${#key} <= OSC_MAX_KEY)) || continue
     [[ $key =~ ^[a-z]+$ ]] || continue
     # The value charset is what the wire allows. A value outside it makes the
-    # pair malformed, and a malformed pair is skipped.
-    [[ $val =~ ^[A-Za-z0-9_.,+/=-]*$ ]] || continue
+    # pair malformed; a malformed *id* is worse than a malformed other pair:
+    # dropping it would turn the report into an id-less (root) report.
+    if [[ ! $val =~ ^[A-Za-z0-9_.,+/=-]*$ ]]; then
+      [[ $key == id ]] && osc_id_bad=1
+      continue
+    fi
     # A repeated key keeps the last value.
     case "$key" in
     state) osc_state=$val ;;
     kind) osc_kind=$val ;;
     progress) osc_progress=$val ;;
     app) osc_app=$val ;;
-    id) osc_id=$val ;;
+    id) osc_id=$val; osc_id_seen=1 ;;
     title) osc_title=$val ;;
     msg) osc_msg=$val ;;
     esac
@@ -384,8 +414,13 @@ if [[ -n $osc_fd ]]; then
   esac
   # An id that breaks the grammar breaks the whole report: the record would
   # be filed under the wrong address, and a wrong record is worse than none.
-  if [[ -n $osc_id ]]; then
-    if ((${#osc_id} > OSC_MAX_ID)) ||
+  # An absent id is the root record; an explicit empty id is not the same
+  # thing and must not fall back to the root (which could overwrite it).
+  if ((osc_id_bad)); then
+    fail "the --osc-fd body has an invalid id; the report is ignored"
+  fi
+  if ((osc_id_seen)); then
+    if ((${#osc_id} > OSC_MAX_ID)) || [[ -z $osc_id ]] ||
       [[ ! $osc_id =~ ^[A-Za-z0-9_.+-]{1,32}(/[A-Za-z0-9_.+-]{1,32}){0,7}$ ]]; then
       fail "the --osc-fd body has an invalid id; the report is ignored"
     fi
@@ -415,6 +450,13 @@ if [[ -n $osc_fd ]]; then
   fi
 
   # ---------------------------------------------------------- 3. apply
+  # An id-less report is the root record, which is one per terminal. Without
+  # a terminal id or an explicit session there is no stable scope, and two
+  # writers would share one root file. Refuse that instead of inventing a
+  # collision; the tap always supplies both.
+  if [[ -n $osc_fd && -z $osc_id && -z $terminal_id && -z $session ]]; then
+    fail "an id-less --osc-fd report needs --terminal-id or --session"
+  fi
   # Explicit options win; the body fills only what was not given.
   [[ -n $agent ]] || agent=$osc_app
   # A protocol id may contain `/` (build/test); the record file name must not,
@@ -467,7 +509,15 @@ esac
 # whole record.
 [[ -z $tmux_pane || $tmux_pane =~ ^%[0-9]{1,6}$ ]] ||
   fail "--tmux-pane must be empty or a pane id like %3"
-[[ -z $tmux_socket || $tmux_socket =~ ^/[A-Za-z0-9._/-]{0,255}$ ]] || tmux_socket=""
+if [[ -n $tmux_socket ]]; then
+  # An absolute path made of plain segments, no `.`/`..`/empty segment: the
+  # socket is passed to tmux as data, but a traversal path still selects an
+  # arbitrary socket.
+  [[ $tmux_socket =~ ^/[A-Za-z0-9._/-]{1,255}$ ]] &&
+    [[ $tmux_socket != *"/../"* && $tmux_socket != */.. &&
+       $tmux_socket != *"/./"* && $tmux_socket != */. &&
+       $tmux_socket != *"//"* ]] || tmux_socket=""
+fi
 # `--pid` reaches bash arithmetic in resolve_window, and arithmetic recursively
 # evaluates its input, so a non-numeric value is command execution:
 #   --pid 'i[$(id)]'  runs `id`
@@ -504,10 +554,10 @@ strip_control() {
     -e 's/\xd8\x9c//g' \
     -e 's/\xef\xbb\xbf//g'
 }
-prompt=$(strip_control "$prompt")
-message=$(strip_control "$message")
-name=$(strip_control "$name")
-cwd=$(strip_control "$cwd")
+[[ -n $prompt ]] && prompt=$(strip_control "$prompt")
+[[ -n $message ]] && message=$(strip_control "$message")
+[[ -n $name ]] && name=$(strip_control "$name")
+[[ -n $cwd ]] && cwd=$(strip_control "$cwd")
 # ------------------------------------------------------------- state paths
 
 # A record is at most this large; the reader in Record.qml enforces the same
@@ -577,8 +627,8 @@ require_owned_chain "$state_dir"
 # `b-c` no longer both publish to `a-b-c.json`.
 record_name="$(sanitize "$agent")~$(sanitize "$session").json"
 file="$state_dir/$record_name"
-# Once lock_dir holds fd 9, every read and write addresses the record through
-# that descriptor rather than through the path: /proc/self/fd/9/<name> resolves
+# Once lock_dir holds its descriptor, every read and write addresses the record
+# through that descriptor rather than through the path: /proc/self/fd/N/<name> resolves
 # to the very inode that was vetted, so a same-user writer that renames the
 # directory — or swaps a symlink in at any component — between the checks and
 # the write cannot redirect it. `dir_ref` is empty until the lock is held.
@@ -590,10 +640,21 @@ dir_ref=""
 # redirect the lock. -w bounds the wait so one stuck writer cannot block every
 # other integration forever.
 lock_dir() {
-  exec 9<"$state_dir" || fail "cannot open $state_dir"
-  flock -w 5 -x 9 || fail "cannot lock $state_dir"
+  # A fresh descriptor, not a fixed number: `exec 9<` used to replace a
+  # caller's --emit-osc 9, and any fixed number can collide with a caller's
+  # descriptor or a low RLIMIT_NOFILE.
+  local lock_fd
+  exec {lock_fd}<"$state_dir" || fail "cannot open $state_dir"
+  dir_ref="/proc/$$/fd/$lock_fd"
+  flock -w 5 -x "$lock_fd" || fail "cannot lock $state_dir"
+  # Re-vet the path AFTER the open: a symlinked component planted between the
+  # earlier check and this open would otherwise be followed, and the identity
+  # check below alone cannot see it (stat follows the link too). The fd identity
+  # check then catches a swap-back between this re-check and the open.
+  require_owned_chain "$state_dir"
+  [[ -d /proc/$$/fd/$lock_fd ]] || fail "$state_dir is not a directory"
   local fd_id path_id
-  fd_id=$(stat -Lc '%d:%i' /proc/self/fd/9 2>/dev/null || true)
+  fd_id=$(stat -Lc '%d:%i' "/proc/$$/fd/$lock_fd" 2>/dev/null || true)
   path_id=$(stat -c '%d:%i' -- "$state_dir" 2>/dev/null || true)
   [[ -n $fd_id && $fd_id == "$path_id" ]] || fail "$state_dir changed while it was being locked"
 }
@@ -605,7 +666,7 @@ lock_dir() {
 # sequence is a fixed state, a validated id/list, and base64 — nothing that can
 # break out of the escape, and `printf` is a builtin fed by a variable, so no
 # shell source is built from it.
-b64() { printf '%s' "$1" | base64 -w0; }
+b64() { printf '%s' "$1" | base64 -w0 2>/dev/null || true; }
 
 emit_report() {
   [[ -n $emit_osc ]] || return 0
@@ -616,6 +677,10 @@ emit_report() {
     seq="state=clear:app=$agent"
     [[ -n $record_id ]] && seq+=":id=$record_id"
   else
+    case "$state" in
+    idle | working | done | blocked | error) ;;
+    *) return 0 ;;
+    esac
     seq="state=$state"
     # kind and progress describe a run that is in flight. A settled report
     # (done, error) has no run left, and a cleared one has no record at all,
@@ -625,8 +690,11 @@ emit_report() {
       [[ -n $progress ]] && seq+=":progress=$progress"
     fi
     seq+=":app=$agent"
-    [[ -n $name ]] && seq+=":title=$(b64 "$name")"
-    [[ -n $message ]] && seq+=":msg=$(b64 "$message")"
+    local title_b64 msg_b64
+    title_b64=$(b64 "$name")
+    msg_b64=$(b64 "$message")
+    [[ -n $title_b64 ]] && seq+=":title=$title_b64"
+    [[ -n $msg_b64 ]] && seq+=":msg=$msg_b64"
     [[ -n $record_id ]] && seq+=":id=$record_id"
   fi
   if [[ $emit_osc == tty ]]; then
@@ -641,9 +709,30 @@ if ((remove)) || [[ $state == clear ]]; then
   # emitted sequence says `state=clear` and never the default working.
   state=clear
   lock_dir
+  # The wire address is the protocol id, not the record's file name. When the
+  # caller did not supply --record-id, recover it from the record being
+  # removed; otherwise a terminal consumer would clear the app's root record
+  # while a different record disappeared from disk.
+  if [[ -z $record_id ]]; then
+    old_remove=$(read_record "$dir_ref/$record_name")
+    record_id=$(jq -r 'if type == "object" then (.recordId // "") else "" end' \
+      <<<"${old_remove:-{}}" 2>/dev/null || true)
+    if ((${#record_id} > 263)) ||
+      [[ ! $record_id =~ ^[A-Za-z0-9_.+-]{1,32}(/[A-Za-z0-9_.+-]{1,32}){0,7}$ ]]; then
+      record_id=""
+    fi
+  fi
+  # A --remove of an arbitrary file cannot be expressed on the wire: an
+  # id-less clear would delete the app's root record instead. Suppress the
+  # emission in that case; a root record (session "root"/"root-...") and an
+  # explicit --state clear still emit. The tap uses --state clear for a root
+  # removal, so its wire stays in step.
+  if ((remove)) && [[ -z $record_id ]] && [[ $session != root && $session != root-* ]]; then
+    emit_osc=""
+  fi
   emit_report
   # Through the descriptor lock_dir just opened, not through the path.
-  rm -f -- "/proc/self/fd/9/$record_name"
+  rm -f -- "$dir_ref/$record_name"
   exit 0
 fi
 
@@ -669,17 +758,18 @@ resolve_window() {
   local clients
   clients=$(timeout 2 hyprctl -j clients 2>/dev/null) || return 0
 
-  local pid matches="" count=0
-  for pid in "${chain[@]}"; do
-    # A number, so it could travel as an argument; the addresses below are
-    # compositor data, but they ride a descriptor anyway so that no value at
-    # all is ever handed to jq as a named argument.
-    matches=$(jq -c --argjson pid "$pid" '[.[] | select(.pid == $pid)]' <<<"$clients" 2>/dev/null)
-    count=$(jq 'length' <<<"${matches:-[]}" 2>/dev/null)
-    [[ $count =~ ^[0-9]+$ ]] || count=0
-    ((count > 0)) && break
-    matches=""
-  done
+  # One jq for the whole chain, in chain order (nearest ancestor first).
+  # The old loop ran two jq processes per ancestor: up to 32 forks for a
+  # lookup that costs one.
+  local IFS=,
+  local chain_json="[${chain[*]}]"
+  local matches count
+  matches=$(jq -c --argjson chain "$chain_json" \
+    'first($chain[] as $p | [.[] | select(.pid == $p)] | select(length > 0)) // []' \
+    <<<"$clients" 2>/dev/null)
+  [[ -n $matches ]] || matches='[]'
+  count=$(jq 'length' <<<"$matches" 2>/dev/null)
+  [[ $count =~ ^[0-9]+$ ]] || count=0
   if ((count == 0)); then
     # A multiplexer pane runs under its own daemon, so no ancestor owns a
     # window: herdr panes are parented to the herdr server, and a tmux pane to
@@ -709,31 +799,20 @@ resolve_window() {
   jq -r 'sort_by(.focusHistoryID // 999999) | .[0].address' <<<"$matches"
 }
 
-window_address=""
-case "$window" in
-none) ;;
-auto) window_address=$(resolve_window "$pid" || true) ;;
-*) window_address="$window" ;;
-esac
-# resolve_window returns compositor data read back from hyprctl, and the manual
-# value was already held to this regex. Re-check the resolved one too, so the
-# single field that rides back into hyprctl can only ever be a plain address.
-[[ $window_address =~ ^0x[0-9a-fA-F]{1,16}$ ]] || window_address=""
-
 # ------------------------------------------------------------ read/modify
 
 lock_dir
-dir_ref="/proc/self/fd/9"
 
-# The mode is set through the locked descriptor, not through the path: fd 9 is
+# The mode is set through the locked descriptor, not through the path: fd N is
 # the very inode that lock_dir vetted, and a chmod that goes through the /proc
 # magic link acts on that inode, so a rename of the path cannot redirect it. The
 # read-back then keeps the promise honest — a filesystem that does not enforce
 # POSIX modes (FAT, some FUSE and network mounts) would otherwise leave the
 # prompts readable by every local user, and this turns that into a refusal
 # instead of a quiet leak.
-chmod 700 -- /proc/self/fd/9 2>/dev/null || true
-dir_mode=$(stat -Lc %a -- /proc/self/fd/9 2>/dev/null) || dir_mode="unknown"
+[[ -d $dir_ref ]] || fail "$state_dir is not a directory"
+chmod 700 -- "$dir_ref" 2>/dev/null || true
+dir_mode=$(stat -Lc %a -- "$dir_ref" 2>/dev/null) || dir_mode="unknown"
 [[ $dir_mode == 700 ]] ||
   fail "$state_dir is mode $dir_mode, not 700; refusing to write records where another user could read them"
 
@@ -745,6 +824,33 @@ old=$(read_record "$dir_ref/$record_name")
 # report failed silently and no completion ever alerted. Only an object is a
 # record; anything else is treated as no previous record at all.
 jq -e 'type == "object"' >/dev/null 2>&1 <<<"$old" || old='{}'
+
+# Resolve the window under the lock and through the vetted descriptor. A tap
+# reports the same session many times, so reuse the address already stored for
+# this pid; the compositor lookup walks sixteen ancestors and calls hyprctl,
+# which costs ~100 ms and serialises every client. The hint is a record field,
+# not a trust boundary, but reading it through the locked fd keeps a symlinked parent
+# from redirecting the read. The address is re-validated below and in Model.js.
+window_address=""
+case "$window" in
+none) ;;
+auto)
+  hint_window=$(jq -r --argjson pid "$pid" \
+    'if type == "object" and (.pid == $pid) then (.windowAddress // "") else "" end' \
+    <<<"$old" 2>/dev/null || true)
+  [[ $hint_window =~ ^0x[0-9a-fA-F]{1,16}$ ]] || hint_window=""
+  if [[ -n $hint_window ]]; then
+    window_address=$hint_window
+  else
+    window_address=$(resolve_window "$pid" || true)
+  fi
+  ;;
+*) window_address="$window" ;;
+esac
+# resolve_window returns compositor data read back from hyprctl, and the manual
+# value was already held to this regex. Re-check the resolved one too, so the
+# single field that rides back into hyprctl can only ever be a plain address.
+[[ $window_address =~ ^0x[0-9a-fA-F]{1,16}$ ]] || window_address=""
 
 now=$(date +%s%3N 2>/dev/null)
 # +%s%3N is GNU-specific; on a date(1) that prints it literally the writer would
@@ -839,12 +945,20 @@ merged=$(jq -c \
       seq: (($old.seq | count) + 1)
     }
   ' <<<"$old")
+# The merge inherits strings from the previous record. jq only caps them; the
+# writer already has a byte-level control/bidi stripper, so apply it once to
+# the whole compact JSON before anything is published or printed with --json.
+merged=$(strip_control "$merged")
 
-# The record this run will replace must be a plain file: the read above
-# refused anything else, and renaming onto a directory or a device node would
-# either fail or, worse, land somewhere a same-user writer chose.
-[[ ! -e $dir_ref/$record_name || (-f $dir_ref/$record_name && ! -L $dir_ref/$record_name) ]] ||
-  fail "$file exists and is not a regular file"
+# The destination is always a directory entry, never a target: a symlink or a
+# special file left at the path is removed first and then replaced by the
+# atomic rename. A directory is refused (never deleted). This keeps one stale
+# symlink from wedging a session forever, while mv -T still refuses to follow
+# a link into a directory.
+if [[ -L $dir_ref/$record_name ]]; then
+  rm -f -- "$dir_ref/$record_name"
+fi
+[[ ! -d $dir_ref/$record_name ]] || fail "$file exists and is a directory"
 
 # The merged record must still fit the reader's cap. Every field above is
 # bounded, so this is a backstop: a record the reader would refuse is never
@@ -861,9 +975,15 @@ merged_bytes=$(printf '%s' "$merged" | wc -c)
 # a hardlink is not a symlink. umask 077 means the file is born 0600, so nothing
 # chmods a path afterwards (a chmod by name is the same window), and the rename
 # only ever moves a directory entry.
-rand=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n') ||
+rand=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') ||
   fail "cannot read randomness"
+[[ -n $rand ]] || fail "cannot create a staging name"
+# The trap goes in before the first create, not after: a failure between the
+# open and the trap used to leave a .muster.* staging file behind until the
+# hourly prune. The guarded expansion keeps the trap safe when nothing was
+# created yet.
 staging=""
+trap '[[ -n ${staging:-} ]] && rm -f -- "$staging"' EXIT
 attempt=0
 for attempt in 1 2 3 4 5; do
   cand="$dir_ref/.muster.$rand.$attempt"
@@ -873,7 +993,6 @@ for attempt in 1 2 3 4 5; do
   fi
 done
 [[ -n $staging ]] || fail "cannot create a staging file in $state_dir"
-trap 'rm -f "$staging"' EXIT
 # The staged record is verified before it is published: a filesystem that
 # ignores the mode would otherwise put the prompt somewhere other users can
 # read. mktemp already creates it 0600 under umask 077; this checks the result.
@@ -883,6 +1002,7 @@ staging_mode=$(stat -c %a -- "$staging" 2>/dev/null) || staging_mode="unknown"
 # -T: the destination is always treated as a file, so a symlink planted at the
 # record path is replaced rather than followed into a directory.
 mv -T -f -- "$staging" "$dir_ref/$record_name"
+staging=""
 
 # The record is published; only now mirror it to the terminal, so a consumer
 # never sees a report the record writer refused.

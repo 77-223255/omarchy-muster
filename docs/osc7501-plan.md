@@ -32,14 +32,16 @@ Records gain an optional `terminalId` (a stable id for the pty/tap instance):
 
 - CLI: `muster-report --terminal-id <id>`; env `MUSTER_TERMINAL_ID` as fallback.
 - Shape: `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`; empty means absent.
-- `bin/muster-tap` uses `tap:<pid>`.
+- `bin/muster-tap` uses `tap:<pid>:<random token>` and session names
+  `tap-<pid>-<token>-...`; it caps its registry at 64 and sets `MUSTER_TAP=1`
+  so the bundled pi bridge stands down.
 - `Model.normalizeRecord` exposes `terminalId`.
-- `Service.rebuild` keys a session by
-  `terminalId + recordId` when `terminalId` is present; otherwise it keeps the
-  old `pid`/`path` key. This lets one tap own several records without the
-  "one session per pid" collapse.
+- `Service.rebuild` keys a session by the record file path. `pid`, `updatedAt`,
+  `seq` and `terminalId` are self-asserted, so they must not be the identity;
+  path keying also lets one tap own several records.
 - Record file names stay `agent~session.json`; a tap's `session` is
-  `tap-<pid>` for the root record and `tap-<pid>-<safe id>` for a child.
+  `tap-<pid>-<token>` for the root record and
+  `tap-<pid>-<token>-<safe id>-<digest>` for a child.
 - `recordId` stays the protocol `id` and is display/grouping data only; it never
   names a file or reaches a command line.
 

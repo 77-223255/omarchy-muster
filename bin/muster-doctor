@@ -109,31 +109,49 @@ have mkdir "creating the sessions directory"
 have dd "reading a record without following a symlink or blocking on a special file"
 have inotifywait "showing a new session at once instead of on the next scan" optional
 
+# mkdir and every later open follow a symlinked component, so a link at any
+# level moves the whole directory out of the state home. The writers refuse
+# such a path, which means no record is written at all. Check every component
+# even when the sessions directory itself does not exist yet: a symlinked
+# omarchy/muster whose target has no sessions/ is still a broken writer.
+linked=""
+broken=""
+for c in omarchy omarchy/muster omarchy/muster/sessions; do
+  p="$state_base/$c"
+  if [[ -L $p ]]; then
+    linked="$p is a symlink"
+    break
+  fi
+  if [[ -e $p && ! -d $p ]]; then
+    broken="$p is not a directory"
+    break
+  fi
+  if [[ -e $p && ! -O $p ]]; then
+    broken="$p is not owned by this user"
+    break
+  fi
+done
+if [[ -n $linked ]]; then
+  record missing "state path" "$linked; the writers refuse it"
+elif [[ -n $broken ]]; then
+  record missing "state path" "$broken; the writers refuse it"
+else
+  record ok "state path" "no symlinked component under $state_base/omarchy"
+fi
+
 if [[ -L $state_dir ]]; then
   record missing "sessions dir type" "$state_dir is a symlink; the writer refuses it"
 elif [[ -d $state_dir ]]; then
-  record ok "sessions dir" "$state_dir ($(find -- "$state_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l) record(s))"
-  # mkdir and every later open follow a symlinked component, so a link at any
-  # level moves the whole directory out of the state home. The writers refuse
-  # such a path, which means no record is written at all.
-  linked=""
-  for c in omarchy omarchy/muster omarchy/muster/sessions; do
-    [[ -L $state_base/$c ]] && linked="$state_base/$c"
-  done
-  if [[ -n $linked ]]; then
-    record missing "state path" "$linked is a symlink; the writers refuse it"
-  else
-    record ok "state path" "no symlinked component under $state_base/omarchy"
-  fi
+  record ok "sessions dir" "$state_dir ($(find -- "$state_dir" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l) record(s))"
   # A record carries the last user prompt and the working directory, so a
   # group/other-readable directory or record is a leak, not a style nit.
   dir_mode=$(stat -c '%a' -- "$state_dir" 2>/dev/null || echo unknown)
-  if find -- "$state_dir" -maxdepth 0 -perm /077 -print -quit 2>/dev/null | grep -q .; then
+  if [[ -n $(find -- "$state_dir" -maxdepth 0 -perm /077 -print -quit 2>/dev/null) ]]; then
     record missing "sessions dir mode" "$dir_mode — records hold prompts; run: chmod 700 $state_dir"
   else
     record ok "sessions dir mode" "$dir_mode (owner-only)"
   fi
-  open_records=$(find -- "$state_dir" -maxdepth 1 -name '*.json' -perm /077 2>/dev/null | wc -l)
+  open_records=$(find -- "$state_dir" -maxdepth 1 -type f -name '*.json' -perm /077 2>/dev/null | wc -l)
   if ((open_records > 0)); then
     record missing "record mode" "$open_records record(s) group/other-readable; run: chmod 600 $state_dir/*.json"
   else
@@ -198,12 +216,17 @@ done
 # optional for a writer that speaks OSC 7501.
 have base64 "decoding the OSC 7501 title and msg"
 have sed "stripping the control bytes out of the text fields"
+have sha1sum "hashing a protocol id into a collision-resistant record name"
+have iconv "rejecting invalid UTF-8 in a protocol title/msg"
+have readlink "reporting the pi bridge target"
+if command -v base64 >/dev/null && ! timeout 2 base64 -w0 </dev/null >/dev/null 2>&1; then
+  record missing "base64 -w0" "this base64 cannot emit an unbroken OSC 7501 title/msg; install GNU coreutils"
+fi
 # The optional pty receiver: an agent that already emits OSC 7501 needs no hook,
 # only bin/muster-tap, which is Python. Nothing else in the plugin does.
 have python3 "running an OSC 7501 agent with no hook (bin/muster-tap)" optional
-for tool in timeout sort head; do
-  have "$tool" "the shell bounds its scans with it"
-done
+have sort "the shell bounds its scans with it"
+have timeout "bounding hyprctl and the shell scans"
 
 # --------------------------------------------------------------- alerts
 

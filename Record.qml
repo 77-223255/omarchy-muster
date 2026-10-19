@@ -20,6 +20,10 @@ Item {
   property var record: null
   property int reloadToken: 0
   property int maxRecordBytes: Model.MAX_RECORD_BYTES
+  // A listing can mount 256 delegates at once; starting every reader in the
+  // same tick is a process burst. The Service spaces the first read by index.
+  property int readDelay: 0
+  property bool ready: false
 
   // The parent chain is re-vetted here the way the scan's list script vets it,
   // so a directory component swapped for a symlink between the listing and this
@@ -97,6 +101,16 @@ Item {
   // A reload that arrives while a read is in flight is remembered, not dropped:
   // this reader is the only thing that re-reads a rewritten record, so a
   // dropped reload would leave the card stale until the next mtime change.
+  Timer {
+    id: initialRead
+    interval: Math.max(0, root.readDelay)
+    repeat: false
+    onTriggered: {
+      root.ready = true
+      root.read()
+    }
+  }
+
   function read() {
     if (root.path === "") return
     if (reader.running) {
@@ -107,7 +121,7 @@ Item {
   }
 
 
-  onPathChanged: root.read()
-  onReloadTokenChanged: root.read()
-  Component.onCompleted: root.read()
+  onPathChanged: if (root.ready) root.read()
+  onReloadTokenChanged: if (root.ready) root.read()
+  Component.onCompleted: initialRead.start()
 }

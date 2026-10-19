@@ -175,7 +175,7 @@ record 由同一次打开独占创建并写入(`O_EXCL`)之后再原子改名—
 修复 [#8259](https://github.com/basecamp/omarchy/pull/8259) 待合并)。带正文的那版
 是 `notifyContent` 设置,默认关闭:在 `~/.config/omarchy/shell.json` 里打开(或在
 omarchy 自己的设置界面里,它读的是 manifest 里的 schema),提醒就会带上会话标题和
-最后一条 prompt。做成设置而不是改源码,是因为源码改动下次更新就没了,而这个隐私
+最后一条 prompt(没有 prompt 时用项目名)。做成设置而不是改源码,是因为源码改动下次更新就没了,而这个隐私
 取舍应该由你自己明确做。
 
 ## 用法
@@ -232,10 +232,10 @@ omarchy-shell shienze.muster status | jq '.details[]'
 | `kind` | `blocked` 时为 `permission` \| `question` \| `auth` |
 | `progress` | 整数 `0`–`100`,缺省为 `-1` |
 | `recordId` | 协议的层级 `id`(`build/test`),仅用于显示 |
-| `terminalId` | 拥有这条记录的 pty/tap 实例的稳定 id(`tap:<pid>`);存在时,会话按它加 `recordId` 归并,所以一个 tap 可以同时拥有多条记录 |
+| `terminalId` | 拥有这条记录的 pty/tap 实例的稳定 id(`tap:<pid>:<token>`);bar 按记录文件一卡一条,所以一个 tap 可以同时拥有多条记录 |
 | `message` | 协议的 `msg`;`blocked`、`done`、`error` 时显示 |
 | `lastPrompt` | 显示在卡片上 |
-| `pid` | 归属进程;也是去重依据(同 pid 的多条只留最新) |
+| `pid` | 归属进程;仅作显示/聚焦提示,不是记录身份(bar 按记录文件一卡一条) |
 | `windowAddress` | Hyprland 窗口地址;让通知被点击时能聚焦那个终端 |
 | `herdrPane` | herdr pane id;点击时切到那个 pane(最多 64 字符) |
 | `tmuxPane` | tmux pane id(`%3`);点击时选中窗口和 pane,并把已连接的客户端切过去 |
@@ -300,7 +300,8 @@ agent 因此不需要任何 per-agent 代码,而现在这样的 agent 已经有�
 **一个会话只留一个来源。** 如果 agent 自己就会发协议,那 tap 就是那个来源:别再为
 同一个会话同时挂 hook 或打开 pi 桥接的 OSC 发送,否则一次运行会变成两条记录。
 pi 桥接默认只写自己的记录,正是这个原因;它自己往终端发那一层要显式开
-`MUSTER_EMIT_OSC=1`。
+`MUSTER_EMIT_OSC=1`。pi 跑在 tap 下面时,tap 会设 `MUSTER_TAP=1`,桥接直接让位,
+所以 pi 只会出现一次。
 
 hook 也可以把协议正文直接交给写入器:
 

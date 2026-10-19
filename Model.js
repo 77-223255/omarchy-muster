@@ -245,9 +245,10 @@ function normalizeRecord(raw, path) {
     name: name,
     // A record with no name still deserves a title: the protocol's `id` is
     // the identity the record chose for itself, and with several records per
-    // terminal it is what tells two otherwise identical cards apart. Project
+    // terminal it is what tells two otherwise identical cards apart. The
+    // fallback is capped for display; the full id stays in recordId. Project
     // and agent label stay the later fallbacks they were.
-    title: name !== "" ? name : (recordId !== "" ? recordId
+    title: name !== "" ? name : (recordId !== "" ? recordId.slice(0, 80)
       : (project !== "" ? project : meta.label)),
     cwd: cwd,
     project: project,
@@ -270,8 +271,8 @@ function normalizeRecord(raw, path) {
     // and a value that is not one of those shapes is dropped here too.
     tmuxPane: /^%[0-9]{1,6}$/.test(asText(raw.tmuxPane))
       ? asText(raw.tmuxPane) : "",
-    tmuxSocket: /^\/[A-Za-z0-9._/-]{0,255}$/.test(asText(raw.tmuxSocket))
-      ? asText(raw.tmuxSocket) : "",
+    tmuxSocket: /^\/(?!\.\.(?:\/|$))[A-Za-z0-9._-]+(?:\/(?!\.\.(?:\/|$))[A-Za-z0-9._-]+)*$/.test(asText(raw.tmuxSocket))
+      && asText(raw.tmuxSocket).length <= 256 ? asText(raw.tmuxSocket) : "",
     updatedAt: toNumber(raw.updatedAt, 0),
     completedRuns: toNumber(raw.completedRuns, 0),
     seq: toNumber(raw.seq, 0)

@@ -188,6 +188,7 @@ Item {
 
   property var recordPaths: []
   property var _seen: ({})
+  property var _pathSeen: ({})
   // Paths whose settled (done/error) state the user has already looked at by
   // focusing the session. The protocol leaves "stop showing a finished record"
   // to the consumer; this is that acknowledgement, held in memory only.
@@ -208,17 +209,39 @@ Item {
     // miss the record that actually changed.
     var raw = String(line)
     var cut = raw.indexOf("\t")
+    var event = cut >= 0 ? raw.slice(0, cut) : ""
     var name = cut >= 0 ? raw.slice(cut + 1) : ""
     if (name.slice(-5) === ".json") {
       var path = String(root.stateDir) + "/" + name
-      for (var i = 0; i < recordInstantiator.count; i++) {
-        var watcher = recordInstantiator.objectAt(i)
-        if (watcher && String(watcher.path) === path) watcher.reloadToken++
-      }
+      if (event.indexOf("DELETE") !== -1 || event.indexOf("MOVED_FROM") !== -1)
+        root.forgetPath(path)
+      else
+        root.scheduleReload(path)
     }
     // Events can arrive far faster than a scan can run; coalesce the scan
     // through a short timer rather than spawning find|sort|head per event.
     root._watchPending = true
+  }
+
+  // A record file that is gone must leave the listing, or the "known paths"
+  // protection would keep deleted sessions forever and eventually crowd out
+  // every new one.
+  function forgetPath(path: string): void {
+    if (path === "") return
+    var index = root.recordPaths.indexOf(path)
+    if (index !== -1) {
+      var next = root.recordPaths.slice()
+      next.splice(index, 1)
+      root.recordPaths = next
+    }
+    delete root._mtimes[path]
+    delete root._acknowledged[path]
+    delete root._pathSeen[path]
+    if (root._reloadQueue[path] === true) {
+      delete root._reloadQueue[path]
+      root._reloadQueued -= 1
+    }
+    root.scheduleRebuild()
   }
 
   // Creates and vets the state directory chain. Retried a bounded number of
@@ -515,16 +538,65 @@ Item {
     if (dirId !== "") root._watchDirId = dirId
 
     var previous = root._mtimes
+    var nowMs = Date.now()
+    // The listing is capped at 256 by mtime, and mtime is writer-controlled:
+    // 256 freshly touched files could push every real session out of the bar.
+    // Keep recently known paths ahead of the new ones, up to 512; a path that
+    // has not been seen for ten minutes is dropped, so deleted files do not
+    // accumulate forever. The oldest known paths give way first.
+    var seen = ({})
+    var merged = []
+    for (var i = 0; i < paths.length; i++) {
+      root._pathSeen[paths[i]] = nowMs
+      seen[paths[i]] = true
+      merged.push(paths[i])
+    }
+    var knownPaths = []
+    for (var k = 0; k < root.recordPaths.length; k++) {
+      var known = root.recordPaths[k]
+      if (seen[known] || previous[known] === undefined) continue
+      if (nowMs - (root._pathSeen[known] || 0) > 600000) continue
+      knownPaths.push(known)
+      seen[known] = true
+    }
+    knownPaths.sort(function (a, b) {
+      return (root._pathSeen[a] || 0) - (root._pathSeen[b] || 0)
+    })
+    merged = knownPaths.concat(merged)
+    while (merged.length > 512) merged.shift()
+    seen = ({})
+    for (var m = 0; m < merged.length; m++) seen[merged[m]] = true
+    for (var key in root._pathSeen) {
+      if (!seen[key]) delete root._pathSeen[key]
+    }
+
+    var nextMtimes = ({})
+    for (var i = 0; i < paths.length; i++) nextMtimes[paths[i]] = mtimes[paths[i]]
+    for (var k = 0; k < merged.length; k++) {
+      var kept = merged[k]
+      if (nextMtimes[kept] === undefined && previous[kept] !== undefined)
+        nextMtimes[kept] = previous[kept]
+    }
+    paths = merged
+
     var pathsChanged = JSON.stringify(paths) !== JSON.stringify(root.recordPaths)
-    root._mtimes = mtimes
+    root._mtimes = nextMtimes
     if (pathsChanged) recordPaths = paths
+    // Acknowledged paths are in-memory only. Drop the ones whose record is
+    // gone so a long shell session does not grow the map without bound.
+    if (pathsChanged) {
+      for (var ack in root._acknowledged) {
+        if (paths.indexOf(ack) === -1) delete root._acknowledged[ack]
+      }
+    }
     // A new path is read when its Record mounts, so only an existing record
     // whose mtime moved needs an explicit reload.
     for (var j = 0; j < recordInstantiator.count; j++) {
       var watcher = recordInstantiator.objectAt(j)
       if (!watcher) continue
       var current = String(watcher.path || "")
-      if (current !== "" && previous[current] !== mtimes[current]) watcher.reloadToken++
+      if (current !== "" && previous[current] !== undefined
+          && previous[current] !== nextMtimes[current]) root.scheduleReload(current)
     }
   }
 
@@ -534,23 +606,80 @@ Item {
 
     delegate: Record {
       required property var modelData
+      required property int index
       path: modelData
+      readDelay: Math.round(index * 5000 / Math.max(1, root.recordPaths.length))
       stateBase: Model.stateBase(Quickshell.env("XDG_STATE_HOME") || "", root.home)
-      onRecordChanged: root.rebuild()
+      onRecordChanged: root.scheduleRebuild()
     }
 
-    onObjectAdded: root.rebuild()
-    onObjectRemoved: root.rebuild()
+    onObjectAdded: root.scheduleRebuild()
+    onObjectRemoved: root.scheduleRebuild()
+  }
+
+  // One rebuild per burst of record changes. A tap can publish several
+  // records in one batch, and rebuilding the whole list for each of them is
+  // O(N^2) at the 256-record cap. `restart()` must not run while the timer is
+  // already armed: a writer faster than the interval would postpone the
+  // rebuild forever and freeze the bar and the completion alerts.
+  function scheduleRebuild(): void {
+    if (!rebuildTimer.running) rebuildTimer.restart()
+  }
+
+  Timer {
+    id: rebuildTimer
+    interval: 100
+    repeat: false
+    onTriggered: root.rebuild()
+  }
+
+  // Record reads are bounded in the same way: one writer can touch a file
+  // faster than a reader can run, so changed paths go through a queue and at
+  // most four reads start per interval. Duplicate paths coalesce.
+  property var _reloadQueue: ({})
+  property int _reloadQueued: 0
+
+  function scheduleReload(path: string): void {
+    if (path === "" || root._reloadQueue[path] === true) return
+    root._reloadQueue[path] = true
+    root._reloadQueued += 1
+    if (!reloadTimer.running) reloadTimer.start()
+  }
+
+  function flushReloads(): void {
+    var paths = Object.keys(root._reloadQueue)
+    for (var i = 0; i < paths.length && i < 4; i++) {
+      var path = paths[i]
+      delete root._reloadQueue[path]
+      root._reloadQueued -= 1
+      for (var j = 0; j < recordInstantiator.count; j++) {
+        var watcher = recordInstantiator.objectAt(j)
+        if (watcher && String(watcher.path) === path) {
+          watcher.reloadToken++
+          break
+        }
+      }
+    }
+    if (root._reloadQueued === 0) reloadTimer.stop()
+  }
+
+  Timer {
+    id: reloadTimer
+    interval: 150
+    repeat: true
+    onTriggered: root.flushReloads()
   }
 
   // ------------------------------------------------------------- sessions
 
   function rebuild() {
     var now = Date.now()
-    // One live session per agent process: a stale record left behind by a
-    // crash, or a hand-copied file, must not show up as a second session.
-    var byKey = ({})
-    var order = []
+    // One card per record file. The file path is the identity the service
+    // actually observes; `pid`, `updatedAt`, `seq` and `terminalId` are all
+    // self-asserted by the writer. Keying by pid used to let a forged record
+    // with a victim's pid replace the victim's card; a forged record can
+    // still add a card, but it cannot evict a different file's card.
+    var collected = []
     for (var i = 0; i < recordInstantiator.count; i++) {
       var watcher = recordInstantiator.objectAt(i)
       if (!watcher) continue
@@ -567,29 +696,9 @@ Item {
         delete root._acknowledged[session.path]
       }
       if (Model.isStale(session, now, root.staleAfterSec, root.settledAfterSec)) continue
-      // One live session per agent process — unless a terminal owns several
-      // records at once: bin/muster-tap can emit multiple OSC 7501 records
-      // under one pid, and keying those by pid would collapse them into a
-      // single card. A record that names its terminal is keyed by terminal +
-      // record identity instead, so each keeps its own card; records without
-      // a terminal id keep the old pid/path rule. JSON.stringify keeps the
-      // key unambiguous — a recordId may contain any separator character.
-      var key = session.terminalId !== ""
-        ? JSON.stringify(["term", session.terminalId, session.recordId, session.path])
-        : (session.pid > 0 ? ("pid:" + session.pid) : ("path:" + session.path))
-      var existing = byKey[key]
-      if (!existing) {
-        byKey[key] = session
-        order.push(key)
-        continue
-      }
-      if (session.updatedAt > existing.updatedAt
-          || (session.updatedAt === existing.updatedAt && session.seq > existing.seq))
-        byKey[key] = session
+      collected.push(session)
     }
 
-    var collected = []
-    for (var k = 0; k < order.length; k++) collected.push(byKey[order[k]])
     collected = Model.sortSessions(collected)
     root.detectCompletions(collected, now)
 
@@ -611,7 +720,8 @@ Item {
       parts.push(JSON.stringify([session.path, session.agent, session.state,
         session.kind, session.progress, session.completedRuns, session.updatedAt,
         session.name, session.message, session.lastPrompt, session.cwd, session.project,
-        session.recordId, session.terminalId]))
+        session.recordId, session.terminalId, session.windowAddress, session.herdrPane,
+        session.tmuxPane, session.tmuxSocket, session.pid]))
     }
     return parts.join("\n")
   }
@@ -692,7 +802,7 @@ Item {
     // one that can fail without a client — switch-client — goes last, after the
     // selects have already pointed the session at the pane.
     if (/^%[0-9]{1,6}$/.test(String(tmuxPane || ""))) {
-      var server = /^\/[A-Za-z0-9._\/-]{0,255}$/.test(String(tmuxSocket || "")) ? ' -S "$4"' : ""
+      var server = /^\/(?!\.\.(?:\/|$))[A-Za-z0-9._-]+(?:\/(?!\.\.(?:\/|$))[A-Za-z0-9._-]+)*$/.test(String(tmuxSocket || "")) && String(tmuxSocket || "").length <= 256 ? ' -S "$4"' : ""
       steps.push('timeout 2 tmux' + server + ' select-window -t "$3" \\; select-pane -t "$3" \\; switch-client -t "$3" >/dev/null 2>&1 || true')
     }
     if (/^0x[0-9a-fA-F]{1,16}$/.test(String(address || "")))
@@ -740,7 +850,7 @@ Item {
     } else if (root.notifyContentEnabled) {
       subject = "Muster  ·  " + session.title
       body = session.lastPrompt !== "" ? Model.truncate(session.lastPrompt, 180)
-        : (session.cwd !== "" ? session.cwd : "finished")
+        : (session.project !== "" ? session.project : "finished")
     } else {
       subject = "Muster  ·  " + who.label
       body = session.state === "blocked" ? "Needs your input"

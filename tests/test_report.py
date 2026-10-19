@@ -99,6 +99,15 @@ class State:
 
 # ------------------------------------------------------------- the reports
 
+def test_an_idless_report_needs_a_scope():
+    with State() as state:
+        result = state.run(["--osc-fd", "0", "--window", "none"],
+                           b"state=working:app=claude")
+        check("idless: a root report without a scope is refused",
+              result.returncode != 0, result.stderr)
+        eq("idless: no record is written", state.records(), [])
+
+
 def test_valid_body():
     with State() as state:
         body = ("state=working:app=claude:id=build/test:progress=42"
@@ -386,18 +395,27 @@ def test_terminal_id():
 
 # ------------------------------------------------------------- the emitted OSC
 
-def test_remove_emits_clear():
+def test_remove_emits_clear_for_the_root():
     with State() as state:
-        state.run(["--agent", "claude", "--session", "s", "--window", "none"])
+        state.run(["--agent", "claude", "--session", "root", "--window", "none"])
         check("the removal: a record is there to remove",
               len(state.records()) == 1)
-        result = state.run(["--agent", "claude", "--session", "s", "--remove",
+        result = state.run(["--agent", "claude", "--session", "root", "--remove",
                             "--emit-osc", "1", "--window", "none"])
         out = result.stdout.decode()
         check("the removal: the sequence says clear", "state=clear" in out, out)
         check("the removal: the sequence is not working",
               "state=working" not in out, out)
         check("the removal: the sequence names the app", "app=claude" in out, out)
+        eq("the removal: the record is gone", state.records(), [])
+
+
+def test_remove_without_a_wire_address_is_silent():
+    with State() as state:
+        state.run(["--agent", "claude", "--session", "s", "--window", "none"])
+        result = state.run(["--agent", "claude", "--session", "s", "--remove",
+                            "--emit-osc", "1", "--window", "none"])
+        eq("the removal: no id-less clear is emitted", result.stdout, b"")
         eq("the removal: the record is gone", state.records(), [])
 
 

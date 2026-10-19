@@ -223,7 +223,7 @@ fix [#8259](https://github.com/basecamp/omarchy/pull/8259) pending). The
 version that does show the prompt is the `notifyContent` setting, off by
 default: switch it on in `~/.config/omarchy/shell.json` (or in omarchy's own
 settings screen, which reads the manifest's schema) and the toast carries the
-session title and the last prompt instead. It is a setting rather than a
+session title and the last prompt (or the project name when there is no prompt) instead. It is a setting rather than a
 source edit on purpose — an edit would be lost on the next update, and the
 privacy trade is one the user should make deliberately.
 
@@ -284,10 +284,10 @@ One JSON object per session in
 | `kind` | `permission` \| `question` \| `auth`, when `blocked` |
 | `progress` | integer `0`–`100`, or `-1` for absent |
 | `recordId` | the protocol's hierarchical `id` (`build/test`); display only |
-| `terminalId` | a stable id for the pty/tap instance that owns the record (`tap:<pid>`); a session is keyed by it plus `recordId` when it is present, so one tap can own several records |
+| `terminalId` | a stable id for the pty/tap instance that owns the record (`tap:<pid>:<token>`); the bar keeps one card per record file, so one tap can own several records |
 | `message` | the protocol's `msg`; shown when `blocked`, `done` or `error` |
 | `lastPrompt` | shown on the card |
-| `pid` | owning process; also how duplicate records are collapsed |
+| `pid` | owning process; a hint for display/focus, not the record identity (the bar keys one card per record file) |
 | `windowAddress` | Hyprland address; makes the notification's click focus that terminal |
 | `herdrPane` | herdr pane id (`w1:p6`); a herdr session's pane has no window of its own, so a click switches to it with `herdr agent focus` |
 | `tmuxPane` | tmux pane id (`%3`); a click selects the window and pane and moves the attached client to it |
@@ -366,7 +366,9 @@ record when the agent exits (a `done`/`error` record is left behind).
 is that source: do not also run a hook or the pi bridge's OSC emission for the
 same session, or the same run turns into two records. The pi bridge writes
 only its record by default for exactly this reason; its own terminal emission
-is the opt-in `MUSTER_EMIT_OSC=1`.
+is the opt-in `MUSTER_EMIT_OSC=1`. When pi runs under the tap, the tap sets
+`MUSTER_TAP=1` and the bridge stands down entirely, so pi appears exactly
+once.
 
 A hook can also hand the protocol body straight to the writer:
 
