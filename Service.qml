@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 
 // The single source of truth for agent sessions.
@@ -40,9 +41,9 @@ Item {
   // The marks are ours, so the fill is ours too: they mirror the bar/panel
   // palette — blocked urgent, working accent, idle the notification text
   // colour. (org.freedesktop.Notifications itself has no colour field.)
-  readonly property color notificationText: Color.notifications.text
-  readonly property color notificationAccent: Color.accent
-  readonly property color notificationUrgent: Color.urgent
+  readonly property color notificationText: Commons.Color.notifications.text
+  readonly property color notificationAccent: Commons.Color.accent
+  readonly property color notificationUrgent: Commons.Color.urgent
   onNotificationTextChanged: root.writeMarks()
   onNotificationAccentChanged: root.writeMarks()
   onNotificationUrgentChanged: root.writeMarks()
@@ -106,7 +107,7 @@ Item {
     "# close it because a hardlink is not a symlink. The mode comes from the",
     "# umask, so nothing has to chmod the path afterwards (a chmod by name is the",
     "# same reopen window), and the rename only ever moves a directory entry.",
-    "rand=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n') || return 1",
+    "rand=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n') || exit 1",
     "write() {",
     "  name=\"$1\"; font=\"$2\"; code=\"$3\"; fill=\"$4\"; y=\"$5\"",
     "  local n=0 cand tmp=\"\"",
@@ -135,6 +136,11 @@ Item {
   ].join("\n")
 
   function writeMarks() {
+    // The colour bindings evaluate before Component.onCompleted starts the
+    // setup walk, and the mark script's mkdir runs under umask 022: writing
+    // marks first could create the shared …/omarchy directory
+    // group-traversable. Wait until the walk has succeeded.
+    if (!root._setupDone) return
     if (markWriter.running) {
       root._marksPending = true
       return
@@ -142,6 +148,10 @@ Item {
     markWriter.running = true
   }
 
+  property bool _setupDone: false
+  property int _setupAttempts: 0
+  property bool _watchPending: false
+  property string _watchDirId: ""
   property bool _marksPending: false
 
   // Normalized, sorted sessions. Reassigned wholesale on every change so QML
@@ -161,6 +171,10 @@ Item {
   // tune by editing a line. Change them here if you must.
   readonly property bool soundEnabled: setting("soundEnabled", true) === true
   readonly property bool notifyEnabled: setting("notifyEnabled", true) === true
+  // Off by default: the content toast puts the session title and last prompt
+  // through omarchy-notification-send's argv and its persisted log (mode 0644),
+  // where another local user can read them from /proc/<pid>/cmdline.
+  readonly property bool notifyContentEnabled: setting("notifyContent", false) === true
 
   readonly property int refreshIntervalSec: 2    // fallback rescan cadence; inotifywait makes new records instant
   readonly property int staleAfterSec: 120       // forget a live record whose writer stopped (heartbeat is 30s)
@@ -180,14 +194,21 @@ Item {
   property var _acknowledged: ({})
 
   function refresh() {
+    // Nothing is safe to list until the setup walk has created and vetted the
+    // sessions directory (and the marks writer must not run before it either).
+    if (!root._setupDone) return
     if (!listProcess.running) listProcess.running = true
   }
 
   // One inotify line is "<events>\t<name>". A record that changed is reloaded
   // here, so a content change is seen even when mtime and size did not move.
   function onWatchEvent(line) {
-    var parts = String(line).split("\t")
-    var name = parts.length > 1 ? parts[1] : ""
+    // Slice past the event tab rather than split("\t")[1]: a record name may
+    // itself contain a tab, and split would keep only the first fragment and
+    // miss the record that actually changed.
+    var raw = String(line)
+    var cut = raw.indexOf("\t")
+    var name = cut >= 0 ? raw.slice(cut + 1) : ""
     if (name.slice(-5) === ".json") {
       var path = String(root.stateDir) + "/" + name
       for (var i = 0; i < recordInstantiator.count; i++) {
@@ -195,16 +216,27 @@ Item {
         if (watcher && String(watcher.path) === path) watcher.reloadToken++
       }
     }
-    root.refresh()
+    // Events can arrive far faster than a scan can run; coalesce the scan
+    // through a short timer rather than spawning find|sort|head per event.
+    root._watchPending = true
+  }
+
+  // Creates and vets the state directory chain. Retried a bounded number of
+  // times so a transient failure, or a symlink a same-user writer planted, does
+  // not strand the plugin for the rest of the session; the exit handler decides
+  // whether the attempt succeeded.
+  function startSetup() {
+    if (root._setupDone || mkdirProcess.running) return
+    if (root._setupAttempts >= 4) return
+    root._setupAttempts += 1
+    mkdirProcess.running = true
   }
 
   Component.onCompleted: {
-    // mkdirProcess owns the directory chain, and it is the caller that creates
-    // it with umask 077 — the marks are (re)written from its exit handler. Doing
-    // it here as well would race it, and the mark script's umask 022 could then
-    // create the shared …/omarchy directory group-traversable.
-    mkdirProcess.running = true
-    refresh()
+    // mkdirProcess owns the directory chain and creates it with umask 077;
+    // the first scan and the marks both start from its exit handler, so
+    // nothing here runs under a different umask or against a missing path.
+    root.startSetup()
   }
 
   // Creates and vets the two directories the plugin owns, one level at a time.
@@ -280,18 +312,57 @@ Item {
     "prune"
   ].join("\n")
 
+  // Re-vets the sessions directory on every scan and lists it with a fixed
+  // field order. The startup walk proves the path once; a same-user writer can
+  // replace a component with a symlink afterwards, which would redirect the
+  // listing and every read, so the walk is repeated here and each component is
+  // pinned against its parent inode. mtime and size come before the name, so
+  // nothing in a file name can move where the sort key starts, and the whole
+  // pipeline (not just find) runs under the caller's timeout, because sort
+  // buffers all of its input before head can cap it.
+  readonly property string listScript: [
+    "set -u",
+    "b=\"$1\"",
+    "[[ $b == /* ]] || exit 1",
+    "step() {",
+    "  { [ -d \"$1\" ] && [ ! -L \"$1\" ] && [ -O \"$1\" ]; } || return 1",
+    "  pp=$(stat -c '%d:%i' . 2>/dev/null) || return 1",
+    "  ee=$(stat -c '%d:%i' -- \"$1\" 2>/dev/null) || return 1",
+    "  cd -P -- \"$1\" 2>/dev/null || return 1",
+    "  di=$(stat -c '%d:%i' . 2>/dev/null) || return 1",
+    "  dp=$(stat -c '%d:%i' .. 2>/dev/null) || return 1",
+    "  [ \"$di\" = \"$ee\" ] && [ \"$dp\" = \"$pp\" ]",
+    "}",
+    "cd -P -- \"$b\" 2>/dev/null || exit 1",
+    "step omarchy || exit 1",
+    "step muster || exit 1",
+    "step sessions || exit 1",
+    "# The vetted directory's identity, so the service can notice a later swap or",
+    "# recreation and restart its inotify watch instead of watching a dead inode.",
+    "printf '#dir %s\\n' \"$(stat -c '%d:%i' . 2>/dev/null)\"",
+    "find -- . -maxdepth 1 -type f -name '*.json' ! -name $'*\\n*' -printf '%T@\\t%s\\t%f\\n' 2>/dev/null | sort -k1,1nr | head -n 256"
+  ].join("\n")
+
   Process {
     id: mkdirProcess
     running: false
-    command: ["bash", "-c", root.mkdirScript, "muster-mkdir",
+    command: ["timeout", "-k", "2", "30", "bash", "-c", root.mkdirScript, "muster-mkdir",
       Model.stateBase(Quickshell.env("XDG_STATE_HOME") || "", root.home)]
     // The marks live in a directory this script creates, so they are (re)written
     // once it exists — the first write on a fresh install would otherwise race
     // the directory's creation. Only watch the directory once it is ours.
     onExited: function(exitCode) {
-      if (exitCode !== 0) return
+      if (exitCode !== 0) {
+        // A refused symlinked component or a transient failure must not strand
+        // the plugin for the whole session; retry a bounded number of times.
+        if (root._setupAttempts < 4) setupRetry.restart()
+        else console.warn("muster", "state directory setup failed after retries; session monitoring is off until the next shell restart")
+        return
+      }
+      root._setupDone = true
       inotifyProbe.running = true
       root.writeMarks()
+      root.refresh()
     }
   }
 
@@ -307,7 +378,7 @@ Item {
         root.writeMarks()
       }
     }
-    command: ["bash", "-c", root.markScript, "muster-marks", root.marksDir,
+    command: ["timeout", "-k", "2", "30", "bash", "-c", root.markScript, "muster-marks", root.marksDir,
       root.hexColor(root.notificationText), root.hexColor(root.notificationAccent),
       root.hexColor(root.notificationUrgent), Model.stateBase(Quickshell.env("XDG_STATE_HOME") || "", root.home)]
   }
@@ -348,6 +419,25 @@ Item {
   }
 
   Timer {
+    id: setupRetry
+    interval: 5000
+    onTriggered: root.startSetup()
+  }
+
+  Timer {
+    // One scan per burst of watch events, not one per event.
+    interval: 250
+    running: true
+    repeat: true
+    onTriggered: {
+      if (root._watchPending) {
+        root._watchPending = false
+        root.refresh()
+      }
+    }
+  }
+
+  Timer {
     interval: root.refreshIntervalSec * 1000
     running: true
     repeat: true
@@ -377,9 +467,8 @@ Item {
     // The work is bounded by the timeout and the kill, not by a head before the
     // sort, so a flooded directory costs one bounded pass per scan instead of
     // wedging the shell.
-    command: ["bash", "-c",
-      "timeout -k 2 5 find -- \"$1\" -maxdepth 1 -type f -name '*.json' ! -name $'*\\n*' -printf '%p\\t%T@\\t%s\\n' 2>/dev/null | sort -t$'\\t' -k2,2nr | head -n 256",
-      "muster-list", root.stateDir]
+    command: ["timeout", "-k", "2", "5", "bash", "-c", root.listScript,
+      "muster-list", Model.stateBase(Quickshell.env("XDG_STATE_HOME") || "", root.home)]
 
     stdout: StdioCollector {
       waitForEnd: true
@@ -396,22 +485,34 @@ Item {
     var paths = []
     var mtimes = {}
     var lines = String(output || "").split("\n")
+    var dirId = ""
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
       if (line === "") continue
-      // mtime and size are last, so the tab before them is the separator even
-      // when the file name itself contains a tab.
-      var cut = line.lastIndexOf("\t")
-      if (cut <= 0) continue
-      var path = line.slice(0, line.lastIndexOf("\t", cut - 1))
-      if (path === "") continue
-      // Reject a split fragment (a file name containing a newline) and
-      // anything that is not a record under the sessions directory.
-      if (path.indexOf(prefix) !== 0 || path.slice(-5) !== ".json") continue
+      if (line.indexOf("#dir ") === 0) { dirId = line.slice(5); continue }
+      // Fixed fields: mtime, size, name. The name is last and may contain a
+      // tab, so the first two tabs are the only separators; nothing in a file
+      // name can shift where the sort key (mtime) was read from.
+      var t1 = line.indexOf("\t")
+      if (t1 <= 0) continue
+      var t2 = line.indexOf("\t", t1 + 1)
+      if (t2 <= t1) continue
+      var name = line.slice(t2 + 1)
+      if (name === "" || name.indexOf("/") !== -1 || name.slice(-5) !== ".json") continue
+      var path = prefix + name
       paths.push(path)
-      mtimes[path] = line.slice(line.lastIndexOf("\t", cut - 1) + 1)
+      mtimes[path] = line.slice(0, t1) + "\t" + line.slice(t1 + 1, t2)
     }
     paths.sort()
+
+    // A directory replaced after the watch started leaves inotifywait on a dead
+    // inode (it does not exit, so watchRetry never fires). Restart the watch
+    // when the vetted identity moves; the scan above is the fallback meanwhile.
+    if (dirId !== "" && root._watchDirId !== "" && dirId !== root._watchDirId && watchProcess.running) {
+      watchProcess.running = false
+      watchRetry.restart()
+    }
+    if (dirId !== "") root._watchDirId = dirId
 
     var previous = root._mtimes
     var pathsChanged = JSON.stringify(paths) !== JSON.stringify(root.recordPaths)
@@ -434,6 +535,7 @@ Item {
     delegate: Record {
       required property var modelData
       path: modelData
+      stateBase: Model.stateBase(Quickshell.env("XDG_STATE_HOME") || "", root.home)
       onRecordChanged: root.rebuild()
     }
 
@@ -507,6 +609,9 @@ Item {
   // ------------------------------------------------------------- alerts
 
   property real _lastAlertAt: 0
+  property var _alertTimes: []
+  readonly property int alertBurstLimit: 10
+  readonly property int alertBurstWindowMs: 60000
 
   // A record counts as "finished a run" when its completedRuns counter grows.
   // Comparing counters instead of states survives a scan interval that missed
@@ -525,7 +630,16 @@ Item {
   }
 
   function fireAlert(session, now) {
+    // The debounce collapses sessions that finish together; the rolling cap
+    // stops a same-UID writer that keeps growing a record's completedRuns from
+    // turning the alert into a sustained notification and sound stream.
     if (now - root._lastAlertAt < root.debounceMs) return
+    var recent = []
+    for (var i = 0; i < root._alertTimes.length; i++)
+      if (now - root._alertTimes[i] < root.alertBurstWindowMs) recent.push(root._alertTimes[i])
+    if (recent.length >= root.alertBurstLimit) return
+    recent.push(now)
+    root._alertTimes = recent
     root._lastAlertAt = now
     if (root.soundEnabled) root.playSound()
     if (root.notifyEnabled) Quickshell.execDetached(root.notificationCommand(session))
@@ -538,26 +652,44 @@ Item {
       Quickshell.execDetached([root.soundPlayer, root.soundFile])
   }
 
-  // The argv that focuses the session. A session is addressable two ways: a
-  // Hyprland window (any plain terminal) and, inside herdr, a pane. herdr runs
-  // its panes under a daemon, so the pane process has no terminal window in its
-  // ancestry — the window shown is the herdr client's, and the pane is moved to
-  // with `herdr agent focus`. Run the pane switch first, then bring the window
-  // forward. Hyprland >= 0.56 with a Lua config reads `dispatch` as Lua and
-  // rejects the classic `focuswindow address:…`, so try the Lua form first and
-  // fall back — the same pair omarchy-launch-or-focus uses. Both values go in as
-  // positional data, never as shell source. The address *is* placed inside the
-  // Lua string below, so its safety rests on the hex-only test right above it,
-  // and the pane on the id test — both are enforced again in Model.js.
-  function focusCommand(address, pane) {
+  // The argv that focuses the session. A session is addressable three ways: a
+  // Hyprland window (any plain terminal), and inside a multiplexer, a pane.
+  // herdr runs its panes under a daemon, so the pane process has no terminal
+  // window in its ancestry — the window shown is the herdr client's, and the
+  // pane is moved to with `herdr agent focus`. tmux keeps the pane under its
+  // own server, so the window is the attached client's and the pane is reached
+  // with `tmux switch-client`. Move the multiplexer first, then bring the
+  // window forward. Hyprland >= 0.56 with a Lua config reads `dispatch` as Lua
+  // and rejects the classic `focuswindow address:…`, so try the Lua form first
+  // and fall back — the same pair omarchy-launch-or-focus uses. Every value
+  // goes in as positional data, never as shell source: `$1` the address, `$2`
+  // the herdr pane, `$3` the tmux pane, `$4` the tmux socket. The address *is*
+  // placed inside the Lua string below, so its safety rests on the hex-only
+  // test right above it, and each pane on its own id test — all enforced again
+  // in Model.js.
+  function focusCommand(address, herdrPane, tmuxPane, tmuxSocket) {
+    // Every step is bounded: the click runs detached, so a wedged compositor,
+    // multiplexer or tmux server must not leave a stray process behind. Each
+    // call ends in `|| true` because one surface being unavailable must not
+    // stop the others.
     var steps = []
-    if (/^[A-Za-z0-9:_.-]{1,64}$/.test(String(pane || "")))
-      steps.push('herdr agent focus -- "$2" >/dev/null 2>&1 || true')
+    if (/^[A-Za-z0-9:_.-]{1,64}$/.test(String(herdrPane || "")))
+      steps.push('timeout 2 herdr agent focus -- "$2" >/dev/null 2>&1 || true')
+    // `select-window`/`select-pane` set the session's active window and pane
+    // (they work with no client attached); `switch-client -t %N` then moves an
+    // attached client to that session, window and pane. The order matters: a
+    // failing tmux command aborts the rest of a `\;`-joined list, so the only
+    // one that can fail without a client — switch-client — goes last, after the
+    // selects have already pointed the session at the pane.
+    if (/^%[0-9]{1,6}$/.test(String(tmuxPane || ""))) {
+      var server = /^\/[A-Za-z0-9._\/-]{0,255}$/.test(String(tmuxSocket || "")) ? ' -S "$4"' : ""
+      steps.push('timeout 2 tmux' + server + ' select-window -t "$3" \\; select-pane -t "$3" \\; switch-client -t "$3" >/dev/null 2>&1 || true')
+    }
     if (/^0x[0-9a-fA-F]{1,16}$/.test(String(address || "")))
-      steps.push('hyprctl dispatch "hl.dsp.focus({ window = \\"address:$1\\" })" || hyprctl dispatch focuswindow "address:$1"')
+      steps.push('timeout 2 hyprctl dispatch "hl.dsp.focus({ window = \\"address:$1\\" })" || timeout 2 hyprctl dispatch focuswindow "address:$1"')
     if (steps.length === 0) return null
     return ["bash", "-c", steps.join("\n"), "muster-focus",
-      String(address || ""), String(pane || "")]
+      String(address || ""), String(herdrPane || ""), String(tmuxPane || ""), String(tmuxSocket || "")]
   }
 
   // Left-clicking a panel card jumps to the session's terminal; a notification
@@ -569,7 +701,8 @@ Item {
       root._acknowledged[session.path] = true
       root.rebuild()
     }
-    var argv = root.focusCommand(session && session.windowAddress, session && session.herdrPane)
+    var argv = root.focusCommand(session && session.windowAddress, session && session.herdrPane,
+      session && session.tmuxPane, session && session.tmuxSocket)
     if (argv) Quickshell.execDetached(argv)
   }
 
@@ -590,11 +723,26 @@ Item {
     var who = Model.safeAgentLabel(session)
     // The word "test" is in the title, so a self-triggered alert cannot be
     // mistaken for a real completion at a glance.
-    var subject = isTest === true ? "Muster  ·  test"
-      : "Muster  ·  " + who.label
-    var body = isTest === true ? "Test alert"
-      : (session.state === "blocked" ? "Needs your input"
-        : (session.state === "error" ? "Run failed" : "Run finished"))
+    var subject, body
+    if (isTest === true) {
+      subject = "Muster  ·  test"
+      body = "Test alert"
+    } else if (root.notifyContentEnabled) {
+      subject = "Muster  ·  " + session.title
+      body = session.lastPrompt !== "" ? Model.truncate(session.lastPrompt, 180)
+        : (session.cwd !== "" ? session.cwd : "finished")
+    } else {
+      subject = "Muster  ·  " + who.label
+      body = session.state === "blocked" ? "Needs your input"
+        : (session.state === "error" ? "Run failed" : "Run finished")
+    }
+    // omarchy-notification-send only treats a dash-leading description as text
+    // when it is not one of its option flags. A body that is exactly `--image=…`
+    // (or `-i`, `-g`, …) would otherwise be parsed as that option, and `--image`
+    // makes the notification service read the named path. A leading space keeps
+    // such a body a description; every other field here is already a constant
+    // or a sanitised id that cannot start with a dash.
+    if (body.charAt(0) === "-") body = " " + body
     var args = ["omarchy-notification-send", "-u", "normal"]
     var mark = String(session.agentIcon || "")
     if (mark !== "" && who.id !== "") {
@@ -606,47 +754,16 @@ Item {
     }
     args = args.concat([subject, body])
     // Clicking the notification jumps to the terminal that produced it.
-    var focus = root.focusCommand(session.windowAddress, session.herdrPane)
+    var focus = root.focusCommand(session.windowAddress, session.herdrPane,
+      session.tmuxPane, session.tmuxSocket)
     if (focus) args = args.concat(["--exec"]).concat(focus)
     return args
   }
 
-  // -----------------------------------------------------------------------
-  // OPT-IN CONTENT TOAST — UNSAFE, DISABLED ON PURPOSE
-  //
-  // This is the version that puts the session's title and last user prompt in
-  // the toast. It is kept, verbatim, so it can be switched on the day upstream
-  // gives the notification path a private channel — see
-  // basecamp/omarchy#8209 (the fix, basecamp/omarchy#8259, is still unmerged).
-  //
-  // It is not enabled because the text travels through the argv of both
-  // omarchy-notification-send and busctl, and omarchy's notification service
-  // then writes it to ~/.local/state/omarchy/notifications/ (mode 0644).
-  // Another local user can read it from /proc/<pid>/cmdline and, when the home
-  // directory is traversable, from that file. The marketplace build therefore
-  // ships the safe notificationCommand above.
-  //
-  // To opt in: delete the safe notificationCommand above, uncomment the block
-  // below and `omarchy restart shell`. You accept the exposure.
-  //
-  // function notificationCommand(session, isTest) {
-  //   var subject = (isTest === true ? "test  ·  " : "alert  ·  ") + session.title
-  //   var args = ["omarchy-notification-send", "-u", "normal"]
-  //   var mark = String(session.agentIcon || "")
-  //   if (mark !== "") {
-  //     var state = session.state === "working" ? "-working"
-  //       : (session.state === "blocked" ? "-blocked" : "")
-  //     args = args.concat(["-i", root.marksDir + "/" + session.agent + state + ".svg"])
-  //   }
-  //   args = args.concat([
-  //     subject,
-  //     session.lastPrompt !== "" ? Model.truncate(session.lastPrompt, 180)
-  //       : (session.cwd !== "" ? session.cwd : "finished")
-  //   ])
-  //   var focus = root.focusCommand(session.windowAddress, session.herdrPane)
-  //   if (focus) args = args.concat(["--exec"]).concat(focus)
-  //   return args
-  // }
+  // The content variant is the `notifyContent` setting (see manifest.json and
+  // setting() above), not a commented-out copy pasted over this function. It
+  // stays off by default for the reason given above; enabling it is an explicit
+  // choice instead of a source edit that could be lost on update.
 
   // Right-clicking a panel card, the chip's middle click, and the `test` IPC
   // all land here, so the alert path can be checked without waiting for a real
@@ -672,7 +789,10 @@ Item {
         cwd: "",
         windowAddress: ""
       })
-    root._lastAlertAt = 0
+    // Stamp the completion debounce rather than clearing it: resetting it to 0
+    // let the next real completion bypass the 2 s window, so a test plus a
+    // finished run could stack two alerts.
+    root._lastAlertAt = now
     if (root.soundEnabled) root.playSound()
     if (root.notifyEnabled) Quickshell.execDetached(root.notificationCommand(subject, true))
   }

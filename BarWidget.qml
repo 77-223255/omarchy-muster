@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -45,7 +46,7 @@ BarWidget {
     return root.horizontal ? marks : marks.slice(0, 1)
   }
 
-  readonly property color chipForeground: bar ? bar.barForeground : Color.foreground
+  readonly property color chipForeground: bar ? bar.barForeground : Commons.Color.foreground
 
   // Every mark carries the state of its own session, the way a panel card puts
   // the state on its rim and title: blocked is the urgent colour, a running
@@ -54,23 +55,31 @@ BarWidget {
   // The chip as a whole still tracks the aggregate (the button's active tint
   // below), so "something needs you" stays visible at a glance.
   function markColor(state) {
-    if (state === "blocked" || state === "error") return bar ? bar.urgent : Color.urgent
-    if (state === "working" || state === "done") return Color.accent
+    if (state === "blocked" || state === "error") return bar ? bar.urgent : Commons.Color.urgent
+    if (state === "working" || state === "done") return Commons.Color.accent
     if (state === "idle") return chipForeground
     return Util.alpha(chipForeground, 0.45)
   }
 
   readonly property string chipFont: bar ? bar.fontFamily : Style.font.family
 
+  // A mark takes the same fixed slot an icon-only WidgetButton takes, so the
+  // chip keeps the bar's rhythm whatever glyph it carries: omarchy's own brand
+  // marks are a full em wide, a Nerd Font mark only six tenths of one, so a
+  // chip sized off the glyph's advance came out wider than every neighbour
+  // beside it — and narrower than all of them when the bell showed instead.
+  // The slot is the padding; the mark is centred in it, as the tray's icons are.
+  readonly property real markSlot: Style.bar.iconSlot
+
   // Long content scrolls rather than pushing the bar around: the visible width
-  // is capped and the text slides through it, the way omarchy's media widget
+  // is capped and the marks slide through it, the way omarchy's media widget
   // runs a long track title.
   readonly property real maxLabelWidth: Style.space(96)
-  readonly property real labelWidth: horizontal
-    ? Math.min(maxLabelWidth, chipRow.implicitWidth) : Style.space(16)
+  readonly property real labelWidth: Math.min(maxLabelWidth,
+    Math.max(chipMarks.length * markSlot, chipRow.implicitWidth))
 
   implicitWidth: horizontal
-    ? labelWidth + Style.space(17)
+    ? labelWidth
     : (bar ? bar.barSize : Style.bar.sizeHorizontal)
   implicitHeight: bar ? bar.barSize : Style.bar.sizeHorizontal
 
@@ -180,7 +189,8 @@ BarWidget {
           pid: session.pid,
           completedRuns: session.completedRuns,
           window: session.windowAddress,
-          pane: session.herdrPane
+          pane: session.herdrPane,
+          tmux: session.tmuxPane
         })
       }
       return JSON.stringify({
@@ -201,7 +211,7 @@ BarWidget {
     labelVisible: false
     keepSpace: true
     active: root.anyWorking
-    activeColor: root.anyBlocked ? (root.bar ? root.bar.urgent : Color.urgent) : Color.accent
+    activeColor: root.anyBlocked ? (root.bar ? root.bar.urgent : Commons.Color.urgent) : Commons.Color.accent
     tooltipText: root.tooltip
 
     onPressed: function(b) {
@@ -223,7 +233,9 @@ BarWidget {
     Row {
       id: chipRow
       anchors.verticalCenter: parent.verticalCenter
-      spacing: root.horizontal ? Style.space(8) : 0
+      // The slots carry the padding, as the tray's do, so two marks sit as far
+      // apart as two icons of the bar do.
+      spacing: 0
 
       readonly property bool needsScroll: root.horizontal && implicitWidth > labelClip.width
 
@@ -245,6 +257,11 @@ BarWidget {
 
         delegate: Text {
           required property var modelData
+          // A glyph mark sits in its slot, centred, like an icon on the bar. A
+          // record whose agent has no glyph shows its label instead, and that
+          // label keeps whatever width its text needs.
+          width: Math.max(root.markSlot, implicitWidth)
+          horizontalAlignment: Text.AlignHCenter
           textFormat: Text.PlainText
           text: modelData === null ? Model.IDLE_GLYPH
             : (modelData.agentIcon !== "" ? modelData.agentIcon : modelData.agentLabel)

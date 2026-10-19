@@ -76,6 +76,8 @@ Usage: muster-report --agent <id> --session <id> [options]
   --pid <n>            Owning process id (default: $PPID)
   --window <value>     Hyprland window address, "auto" (default) or "none"
   --herdr-pane <id>    herdr pane to focus (default: $HERDR_PANE_ID when in herdr)
+  --tmux-pane <id>     tmux pane to focus (default: $TMUX_PANE when in tmux)
+  --tmux-socket <path> tmux server socket (default: from $TMUX; empty = default server)
   --completed          Increment completedRuns: a run just settled
   --remove             Delete the record and exit
   --json               Print the resulting record (which includes the
@@ -85,6 +87,7 @@ Usage: muster-report --agent <id> --session <id> [options]
 Environment:
   XDG_STATE_HOME       Defaults to ~/.local/state
   HERDR_PANE_ID        Picked up as --herdr-pane when HERDR_ENV=1
+  TMUX, TMUX_PANE      Picked up as --tmux-socket and --tmux-pane when in tmux
 USAGE
 }
 
@@ -113,6 +116,15 @@ pid="$PPID"
 window="auto"
 herdr_pane=""
 [[ ${HERDR_ENV:-} == "1" ]] && herdr_pane="${HERDR_PANE_ID:-}"
+# tmux injects TMUX_PANE ("%3") and TMUX ("<socket>,<pid>,<session>") into every
+# pane. Both are only read when the pane id is the shape tmux writes, so a
+# stray environment cannot put an arbitrary value into the record.
+tmux_pane=""
+tmux_socket=""
+if [[ ${TMUX_PANE:-} =~ ^%[0-9]{1,6}$ ]]; then
+  tmux_pane="$TMUX_PANE"
+  tmux_socket="${TMUX%%,*}"
+fi
 completed=0
 remove=0
 print_json=0
@@ -138,6 +150,8 @@ while (($# > 0)); do
   --pid) pid="${2:-}"; shift 2 || fail "--pid needs a value" ;;
   --window) window="${2:-}"; shift 2 || fail "--window needs a value" ;;
   --herdr-pane) herdr_pane="${2:-}"; shift 2 || fail "--herdr-pane needs a value" ;;
+  --tmux-pane) tmux_pane="${2:-}"; shift 2 || fail "--tmux-pane needs a value" ;;
+  --tmux-socket) tmux_socket="${2:-}"; shift 2 || fail "--tmux-socket needs a value" ;;
   --completed) completed=1; shift ;;
   --remove) remove=1; shift ;;
   --json) print_json=1; shift ;;
@@ -262,6 +276,15 @@ esac
 [[ $state =~ ^[a-z]+$ ]] || fail "--state is not a known state word"
 [[ $herdr_pane =~ ^[A-Za-z0-9:_.-]{0,64}$ ]] ||
   fail "--herdr-pane must be a plain pane id of at most 64 characters"
+# A tmux pane id is always '%' + digits, but the field is absent outside tmux,
+# so empty is allowed and only a non-empty value must match. Unlike the pane,
+# the socket is only a hint: it points tmux at the right server, and a value
+# that is not a plain absolute path is dropped rather than failing the write,
+# so the pane still focuses against the default server instead of losing the
+# whole record.
+[[ -z $tmux_pane || $tmux_pane =~ ^%[0-9]{1,6}$ ]] ||
+  fail "--tmux-pane must be empty or a pane id like %3"
+[[ -z $tmux_socket || $tmux_socket =~ ^/[A-Za-z0-9._/-]{0,255}$ ]] || tmux_socket=""
 # `--pid` reaches bash arithmetic in resolve_window, and arithmetic recursively
 # evaluates its input, so a non-numeric value is command execution:
 #   --pid 'i[$(id)]'  runs `id`
@@ -283,6 +306,23 @@ cwd=${cwd:0:1024}
 [[ -n $name_fd ]] && name=$(read_fd "$name_fd" 80)
 [[ -n $cwd_fd ]] && cwd=$(read_fd "$cwd_fd" 1024)
 
+# C0/C1 control bytes (plus the bidi/format code points) are stripped at
+# write time, matching Model.js's printable(). tr removes C0 and DEL safely;
+# sed removes the UTF-8-encoded C1 and format ranges as whole sequences —
+# a byte-range tr over 0x7f-0x9f would also eat the continuation bytes of
+# ordinary multi-byte text (文 is e6 96 87) and corrupt it.
+strip_control() {
+  printf '%s' "$1" | tr -d '\000-\037\177' | LC_ALL=C sed \
+    -e 's/\xc2[\x80-\x9f]//g' \
+    -e 's/\xe2\x80[\x8b-\x8f\xaa-\xae]//g' \
+    -e 's/\xe2\x81[\xa6-\xa9]//g' \
+    -e 's/\xd8\x9c//g' \
+    -e 's/\xef\xbb\xbf//g'
+}
+prompt=$(strip_control "$prompt")
+message=$(strip_control "$message")
+name=$(strip_control "$name")
+cwd=$(strip_control "$cwd")
 # ------------------------------------------------------------- state paths
 
 # A record is at most this large; the reader in Record.qml enforces the same
@@ -295,7 +335,7 @@ MAX_RECORD_BYTES=65536
 # link, wait on a special file, or allocate without bound.
 read_record() {
   local f="$1" size
-  [[ -f $f && ! -L $f ]] || return 0
+  [[ -f $f && ! -L $f && -O $f ]] || return 0
   size=$(stat -c %s -- "$f" 2>/dev/null) || return 0
   [[ $size =~ ^[0-9]+$ && $size -le $MAX_RECORD_BYTES ]] || return 0
   dd if="$f" iflag=nofollow,nonblock bs="$MAX_RECORD_BYTES" count=1 status=none 2>/dev/null || true
@@ -347,7 +387,10 @@ require_owned_chain "$state_dir"
 [[ -d $state_dir && ! -L $state_dir && -O $state_dir ]] ||
   fail "$state_dir is not a directory owned by this user"
 
-record_name="$(sanitize "$agent")-$(sanitize "$session").json"
+# `~` cannot appear in a sanitised component (sanitize maps everything outside
+# [a-zA-Z0-9._-] to `_`), so the join is unambiguous: `a-b` + `c` and `a` +
+# `b-c` no longer both publish to `a-b-c.json`.
+record_name="$(sanitize "$agent")~$(sanitize "$session").json"
 file="$state_dir/$record_name"
 # Once lock_dir holds fd 9, every read and write addresses the record through
 # that descriptor rather than through the path: /proc/self/fd/9/<name> resolves
@@ -423,7 +466,7 @@ resolve_window() {
   done
   (( ${#chain[@]} > 0 )) || return 0
   local clients
-  clients=$(hyprctl -j clients 2>/dev/null) || return 0
+  clients=$(timeout 2 hyprctl -j clients 2>/dev/null) || return 0
 
   local pid matches="" count=0
   for pid in "${chain[@]}"; do
@@ -437,10 +480,12 @@ resolve_window() {
     matches=""
   done
   if ((count == 0)); then
-    # herdr runs its panes under a daemon, so no ancestor owns a window. The
-    # report comes from the herdr UI, so the focused window is the one to use.
-    [[ -n $herdr_pane ]] || return 0
-    hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null || true
+    # A multiplexer pane runs under its own daemon, so no ancestor owns a
+    # window: herdr panes are parented to the herdr server, and a tmux pane to
+    # the tmux server, whose own client terminal may be gone. The prompt was
+    # typed in the client, so the focused window is the one to use.
+    [[ -n $herdr_pane || -n $tmux_pane ]] || return 0
+    timeout 2 hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null || true
     return 0
   fi
 
@@ -453,7 +498,7 @@ resolve_window() {
   # window, so the parent chain cannot tell them apart. Prefer the focused
   # window, then the most recently focused one.
   local focused address
-  focused=$(hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null)
+  focused=$(timeout 2 hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null)
   address=$(jq -r --rawfile f <(printf '%s' "$focused") \
     '.[] | select(.address == $f) | .address' <<<"$matches" 2>/dev/null | head -n1)
   if [[ -n $address && $address != null ]]; then
@@ -469,6 +514,10 @@ none) ;;
 auto) window_address=$(resolve_window "$pid" || true) ;;
 *) window_address="$window" ;;
 esac
+# resolve_window returns compositor data read back from hyprctl, and the manual
+# value was already held to this regex. Re-check the resolved one too, so the
+# single field that rides back into hyprctl can only ever be a plain address.
+[[ $window_address =~ ^0x[0-9a-fA-F]{1,16}$ ]] || window_address=""
 
 # ------------------------------------------------------------ read/modify
 
@@ -496,7 +545,10 @@ old=$(read_record "$dir_ref/$record_name")
 # record; anything else is treated as no previous record at all.
 jq -e 'type == "object"' >/dev/null 2>&1 <<<"$old" || old='{}'
 
-now=$(date +%s%3N)
+now=$(date +%s%3N 2>/dev/null)
+# +%s%3N is GNU-specific; on a date(1) that prints it literally the writer would
+# abort under set -e. Fall back to whole seconds so the timestamp stays numeric.
+[[ $now =~ ^[0-9]+$ ]] || now=$(( $(date +%s) * 1000 ))
 # Pure shell on purpose: basename(1) is an external process, and the working
 # directory would appear on its command line — world-readable through
 # /proc/<pid>/cmdline, which is exactly what the descriptor options above
@@ -527,6 +579,8 @@ merged=$(jq -c \
   --rawfile message <(printf '%s' "$message") \
   --rawfile window <(printf '%s' "$window_address") \
   --rawfile pane <(printf '%s' "$herdr_pane") \
+  --rawfile tmuxpane <(printf '%s' "$tmux_pane") \
+  --rawfile tmuxsocket <(printf '%s' "$tmux_socket") \
   --argjson pid "${pid:-0}" \
   --argjson now "$now" \
   --argjson completed "$completed" \
@@ -562,7 +616,16 @@ merged=$(jq -c \
       lastPrompt: (if $prompt != "" then $prompt else ($old.lastPrompt | text(240)) end),
       pid: $pid,
       windowAddress: $window,
-      herdrPane: $pane,
+      # A multiplexer pane is a stable property of the session: the pane does
+      # not change while the process lives. So an absent value must not erase
+      # one already known — a report from a hook that does not inherit the
+      # multiplexer environment would otherwise drop the target and the click
+      # would stop jumping. windowAddress stays overwrite-only: a compositor
+      # address can be reused after its window closes, so an inherited one is
+      # not safe to keep. The reader re-validates every inherited value.
+      herdrPane: (if $pane != "" then $pane else ($old.herdrPane | text(64)) end),
+      tmuxPane: (if $tmuxpane != "" then $tmuxpane else ($old.tmuxPane | text(64)) end),
+      tmuxSocket: (if $tmuxsocket != "" then $tmuxsocket else ($old.tmuxSocket | text(256)) end),
       updatedAt: $now,
       completedRuns: (($old.completedRuns | count) + $completed + $settled),
       seq: (($old.seq | count) + 1)

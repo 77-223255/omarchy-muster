@@ -244,6 +244,13 @@ function normalizeRecord(raw, path) {
       ? asText(raw.windowAddress) : "",
     herdrPane: /^[A-Za-z0-9:_.-]{1,64}$/.test(asText(raw.herdrPane))
       ? asText(raw.herdrPane) : "",
+    // A tmux pane id is '%' + digits; the socket is an absolute path. Both are
+    // passed to the click command as positional data, never as shell source,
+    // and a value that is not one of those shapes is dropped here too.
+    tmuxPane: /^%[0-9]{1,6}$/.test(asText(raw.tmuxPane))
+      ? asText(raw.tmuxPane) : "",
+    tmuxSocket: /^\/[A-Za-z0-9._/-]{0,255}$/.test(asText(raw.tmuxSocket))
+      ? asText(raw.tmuxSocket) : "",
     updatedAt: toNumber(raw.updatedAt, 0),
     completedRuns: toNumber(raw.completedRuns, 0),
     seq: toNumber(raw.seq, 0)

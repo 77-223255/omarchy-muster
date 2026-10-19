@@ -13,7 +13,8 @@
 > `main`. See [`docs/osc7501.md`](docs/osc7501.md) for the sketch.
 
 Live coding-agent sessions in the Omarchy bar, with a completion sound and a
-desktop notification — without running a terminal multiplexer.
+desktop notification — no multiplexer required, and a click jumps to the right
+pane when you do use one (tmux or herdr).
 
 - **Bar chip** — one mark per agent that has a session, in the order that needs
   attention (blocked first, then working). Each mark is coloured by its own
@@ -34,9 +35,9 @@ desktop notification — without running a terminal multiplexer.
   nothing. No elapsed timers: the panel answers "is anything running and does it
   need me".
 - **Alerts** — when a run finishes, a sound and an Omarchy notification.
-  Clicking the notification focuses that session's terminal — and, for a
-  herdr-managed session, switches herdr to the pane it runs in. In the panel,
-  **left-clicking a card** focuses that session's terminal too, and
+  Clicking the notification focuses that session's terminal — and, for a session
+  inside tmux or herdr, switches the multiplexer to the pane it runs in. In the
+  panel, **left-clicking a card** focuses that session's terminal too, and
   **right-clicking** one fires the same alert on demand, with `test` in the
   notification title so it cannot be mistaken for a real completion.
 
@@ -163,7 +164,9 @@ that reaches a command line is held to a shape that cannot carry text:
 `--agent` and `--session` name the record file and are limited to a plain id
 charset (`[A-Za-z0-9._-]`), `--pid` to digits because it reaches bash
 arithmetic, `--window` to `auto`/`none`/a hex address, `--state` to the four
-state words, and `--herdr-pane` to a 64-character pane id.
+state words, `--herdr-pane` to a 64-character pane id, `--tmux-pane` to a `%`
+plus digits (or empty, outside tmux), and `--tmux-socket` to a plain absolute
+path (a value that is not one is dropped, not fatal).
 
 The path is vetted the same way: every component under the state home that
 this plugin creates must be a real directory owned by you, so a symlink dropped
@@ -209,7 +212,7 @@ the safe `notificationCommand`, uncomment the block below it, and
 ```bash
 omarchy-shell shienze.muster status | jq '.details[]'
 # {"agent":"pi","state":"working","kind":"","progress":-1,"folder":"tiny-model-primitives",
-#  "pid":835161,"completedRuns":3,"window":"0x601dc3f347b0","pane":""}
+#  "pid":835161,"completedRuns":3,"window":"0x601dc3f347b0","pane":"","tmux":"%3"}
 ```
 
 ## Settings
@@ -254,6 +257,8 @@ One JSON object per session in
 | `pid` | owning process; also how duplicate records are collapsed |
 | `windowAddress` | Hyprland address; makes the notification's click focus that terminal |
 | `herdrPane` | herdr pane id (`w1:p6`); a herdr session's pane has no window of its own, so a click switches to it with `herdr agent focus` |
+| `tmuxPane` | tmux pane id (`%3`); a click selects the window and pane and moves the attached client to it |
+| `tmuxSocket` | tmux server socket (absolute path, from `$TMUX`); empty means the default server |
 | `updatedAt` | ms epoch; drives staleness (`staleAfterSec`, `settledAfterSec`) |
 | `completedRuns` | **the alert trigger** — increment once per finished run |
 | `seq` | monotonic writer counter, used to pick the freshest of two records for one pid |
@@ -359,10 +364,16 @@ runs somewhere else.
 
 It resolves the terminal window from `--pid` (default `$PPID`) through the
 Hyprland client list, so the notification's click focuses the right terminal
-without extra plumbing. Inside herdr the pane's process has no window in its
-ancestry (its parent is the `herdr server` daemon), so the report also records
-`$HERDR_PANE_ID` and the click switches herdr to that pane as well. A Claude
-Code `Stop` hook is then one line:
+without extra plumbing. A multiplexer hides the pane from that window: the pane's
+process either has no window in its ancestry (herdr's parent is the
+`herdr server` daemon) or the window belongs to the server, not the pane.
+Inside herdr the report records `$HERDR_PANE_ID`; inside tmux it records
+`$TMUX_PANE` and the socket from `$TMUX`, so the click moves the multiplexer to
+that pane as well as focusing the terminal. `--herdr-pane`, `--tmux-pane` and
+`--tmux-socket` override the environment when a wrapper knows better. A pane id
+is stable for the life of the pane, so a later report that carries no pane
+(a hook with no multiplexer in its environment) keeps the one already in the
+record instead of erasing it. A Claude Code `Stop` hook is then one line:
 
 ```jsonc
 // ~/.claude/settings.json
@@ -398,7 +409,7 @@ extension must be TypeScript.
 
 | Piece | Language | Depends on |
 |-------|----------|-----------|
-| `Service.qml`, `BarWidget.qml`, `Panel.qml`, `Record.qml` | QML | omarchy shell (Quickshell, Qt 6), `bash`, `find`, `sort`, `head`, `stat`, `dd`, `mkdir`, `chmod`, `timeout`, `hyprctl`, `head`, `od`, `inotifywait` (optional) |
+| `Service.qml`, `BarWidget.qml`, `Panel.qml`, `Record.qml` | QML | omarchy shell (Quickshell, Qt 6), `bash`, `find`, `sort`, `head`, `stat`, `dd`, `mkdir`, `chmod`, `timeout`, `hyprctl`, `head`, `od`, `inotifywait` (optional), `tmux` / `herdr` (optional; only for a session inside them) |
 | `Model.js` | JavaScript (QML engine) | nothing |
 | `pi/muster.ts` | TypeScript | pi's bundled Bun runtime; node builtins only, zero npm packages |
 | `bin/muster-report` | Bash | `jq`, `flock`, `stat`, `dd`, `mv`, `chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od`, `base64`, `rm`, `hyprctl` |

@@ -11,7 +11,8 @@
 > 草图见 [`docs/osc7501.md`](docs/osc7501.md)。
 
 在 Omarchy 状态栏里看住你的 coding agent:谁在跑、谁在等你、谁刚干完活 ——
-完成时还有提示音和系统弹窗,不需要开任何终端复用器。
+完成时还有提示音和系统弹窗;不要求任何终端复用器,而用了 tmux 或 herdr 时,
+点一下也能直接跳到对应的 pane。
 
 - **状态栏图标** —— 每个有会话的 agent 一个标记,按"谁更急"排序(先 blocked,
   再 working)。每个标记按**自己那个会话的状态**着色:blocked 用警示色、working 用
@@ -25,7 +26,8 @@
   名字 —— 标记说明是谁,文件夹说明在哪。卡片内部永远是同一个灰色,状态体现在
   **边框和标题**上:working 是柔和的主题色呼吸边框,blocked 用警示色,idle 不变。
   没有计时器:面板只回答"有没有在跑、要不要我去看"。
-- **提醒** —— 一次运行结束时响一声 + 发一条 Omarchy 通知;点通知会聚焦到那个终端。
+- **提醒** —— 一次运行结束时响一声 + 发一条 Omarchy 通知;点通知会聚焦到那个终端,
+  如果会话在 tmux 或 herdr 里,还会切到它所在的 pane。
   面板里**左键点卡片**同样聚焦到那个终端,**右键点卡片**则按需触发同样的提醒,
   通知标题会带上 `test`,不会和真实完成混淆。
 
@@ -130,7 +132,8 @@ name 和工作目录都从文件描述符读进来(`--prompt-fd`、`--message-fd
 拒绝。凡是会进入命令行参数的值都被限制成携带不了文本的形状:`--agent` 和
 `--session` 用来决定 record 文件名,限制在纯 id 字符集(`[A-Za-z0-9._-]`);
 `--pid` 必须是数字(它会进入 bash 算术);`--window` 只能是 `auto`/`none`/十六进制
-地址;`--state` 只能是四个状态词;`--herdr-pane` 最多 64 字符。
+地址;`--state` 只能是四个状态词;`--herdr-pane` 最多 64 字符;`--tmux-pane` 只能是
+`%` 加数字;`--tmux-socket` 只能是绝对路径(不合形状的值会被丢掉,不会报错)。
 路径也按同样标准 vetting:本插件在 state home 之下创建的每一个组件都必须是由你
 拥有的真实目录,所以别人在 `…/omarchy/muster` 埋一个软链接无法把 sessions 目录
 整体搬到别处。写入端以只读方式锁住该目录(而不是使用可预测的锁文件),并把每条
@@ -166,7 +169,7 @@ record 由同一次打开独占创建并写入(`O_EXCL`)之后再原子改名—
 ```bash
 omarchy-shell shienze.muster status | jq '.details[]'
 # {"agent":"pi","state":"working","kind":"","progress":-1,"folder":"tiny-model-primitives",
-#  "pid":835161,"completedRuns":3,"window":"0x601dc3f347b0"}
+#  "pid":835161,"completedRuns":3,"window":"0x601dc3f347b0","pane":"","tmux":"%3"}
 ```
 
 ## 设置
@@ -209,6 +212,8 @@ omarchy-shell shienze.muster status | jq '.details[]'
 | `pid` | 归属进程;也是去重依据(同 pid 的多条只留最新) |
 | `windowAddress` | Hyprland 窗口地址;让通知被点击时能聚焦那个终端 |
 | `herdrPane` | herdr pane id;点击时切到那个 pane(最多 64 字符) |
+| `tmuxPane` | tmux pane id(`%3`);点击时选中窗口和 pane,并把已连接的客户端切过去 |
+| `tmuxSocket` | tmux 服务器 socket(绝对路径,来自 `$TMUX`);空 = 默认服务器 |
 | `updatedAt` | 毫秒时间戳;决定过期(`staleAfterSec`、`settledAfterSec`) |
 | `completedRuns` | **提醒的触发器** —— 每完成一次运行就 +1 |
 | `seq` | 单调递增的写入计数,用来在两条同 pid 记录里挑最新的 |
@@ -298,9 +303,12 @@ $report --agent claude --session "$SESSION_ID" --remove
 别处时才需要 `--cwd-fd`。
 
 它会用 `--pid`(默认 `$PPID`)沿进程链在 Hyprland 窗口列表里找到你所在的终端,
-所以"点通知聚焦终端"不需要额外配置。在 herdr 里,pane 的进程祖先没有窗口
-(父进程是 `herdr server` 守护进程),所以记录里还会带上 `$HERDR_PANE_ID`,点击时
-顺便让 herdr 切到那个 pane。于是 Claude Code 的 `Stop` hook 只要一行:
+所以"点通知聚焦终端"不需要额外配置。复用器会把 pane 从窗口里藏起来:pane 的进程
+要么祖先里根本没有窗口(herdr 的父进程是 `herdr server` 守护进程),要么窗口属于服务器
+而不是 pane。在 herdr 里记录会带上 `$HERDR_PANE_ID`;在 tmux 里会带上 `$TMUX_PANE`
+和 `$TMUX` 里的 socket,于是点击时既切到那个 pane,也聚焦到终端窗口。
+包装脚本知道得更清楚时,可以用 `--herdr-pane`、`--tmux-pane`、`--tmux-socket` 覆盖。
+于是 Claude Code 的 `Stop` hook 只要一行:
 
 ```jsonc
 // ~/.claude/settings.json

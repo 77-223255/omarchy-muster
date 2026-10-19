@@ -16,6 +16,9 @@ json=0
 
 plugin_dir=${MUSTER_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/shienze.muster}
 state_base=${XDG_STATE_HOME:-$HOME/.local/state}
+# The writers refuse a relative XDG_STATE_HOME. A doctor that audited one would
+# report on a directory the plugin never uses, a false all-green.
+[[ $state_base == /* ]] || { echo "muster-doctor: XDG_STATE_HOME must be an absolute path (got: $state_base)" >&2; exit 2; }
 state_dir="$state_base/omarchy/muster/sessions"
 marks_dir="$state_base/omarchy/muster/marks"
 pi_extension=$HOME/.pi/agent/extensions/muster.ts
@@ -28,13 +31,26 @@ rows=()
 # Anything printed may derive from a record another integration wrote, so it is
 # stripped of control bytes first: a terminal executes ANSI/OSC sequences, and a
 # record's project name can carry them.
+# Anything printed may derive from a record another integration wrote, so it is
+# stripped of control and format code points first: a terminal executes
+# ANSI/OSC sequences, and a record's project name can carry them. tr removes C0
+# and DEL; sed removes the UTF-8-encoded C1 and bidi ranges as whole sequences,
+# because a byte range over 0x7f-0x9f would eat the continuation bytes of
+# ordinary multi-byte text and corrupt it.
 clean() {
-  printf '%s' "$1" | tr -d '\000-\037\177-\237'
+  printf '%s' "$1" | tr -d '\000-\037\177' | LC_ALL=C sed \
+    -e 's/\xc2[\x80-\x9f]//g' \
+    -e 's/\xe2\x80[\x8b-\x8f\xaa-\xae]//g' \
+    -e 's/\xe2\x81[\xa6-\xa9]//g' \
+    -e 's/\xd8\x9c//g' \
+    -e 's/\xef\xbb\xbf//g'
 }
 
 record() {
   # record <status> <name> <detail>
-  rows+=("$1|$2|$(clean "$3")")
+  # Unit Separator, not a pipe: the detail is untrusted text and may contain a
+  # pipe, which the JSON split below would otherwise truncate.
+  rows+=("$1"$'\x1f'"$2"$'\x1f'"$(clean "$3")")
   case $1 in
   ok) ok=$((ok + 1)) ;;
   missing) missing=$((missing + 1)) ;;
@@ -174,7 +190,7 @@ else
   record optional "pi bridge" "link pi/muster.ts into $HOME/.pi/agent/extensions/ (only needed for pi)"
 fi
 
-for tool in bash jq flock stat dd mv chmod tr cut date wc awk cat rm head od base64; do
+for tool in bash jq flock stat dd mv chmod tr cut date wc awk cat rm head od sed base64; do
   have "$tool" "muster-report writes records and OSC 7501 reports with it"
 done
 # The optional pty receiver: an agent that already emits OSC 7501 needs no hook,
@@ -211,18 +227,28 @@ else
   have herdr "switching to a session's herdr pane on click" optional
 fi
 
+# tmux keeps its panes under a server, so a click needs its CLI to switch the
+# attached client back to the pane; only sessions inside tmux use it. There is no
+# reliable way to detect that from outside a pane, so it is required only when
+# this very run is inside tmux.
+if [[ -n ${TMUX:-} ]]; then
+  have tmux "switching to a session's tmux pane on click" required
+else
+  have tmux "switching to a session's tmux pane on click" optional
+fi
+
 # ---------------------------------------------------------------- output
 
 if ((json)); then
   printf '%s\n' "${rows[@]}" | jq -Rn '
-    [inputs | split("|") | {status: .[0], name: .[1], detail: .[2]}]
+    [inputs | split("\u001f") | {status: .[0], name: .[1], detail: .[2]}]
     | {ok: (map(select(.status == "ok")) | length),
        optional: (map(select(.status == "optional")) | length),
        missing: (map(select(.status == "missing")) | length),
        checks: .}'
 else
   for row in "${rows[@]}"; do
-    IFS='|' read -r status name detail <<<"$row"
+    IFS=$'\x1f' read -r status name detail <<<"$row"
     case $status in
     ok) printf '  \033[32m✓\033[0m %-22s %s\n' "$name" "$detail" ;;
     missing) printf '  \033[31m✗\033[0m %-22s %s\n' "$name" "$detail" ;;

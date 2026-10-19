@@ -20,7 +20,7 @@
 // the watcher does not have to catch a working→idle transition mid-scan.
 
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -143,12 +143,33 @@ function sanitize(value) {
 		.slice(0, 80);
 }
 
+// C0/C1 control and bidi/format code points, the same set bin/muster-report and
+// Model.js strip: a record is rendered by a terminal and a card, and a raw
+// ESC/OSC or bidi override in a project name would drive them. A JS regex is
+// code-point aware, so unlike a byte-range tr it cannot corrupt multi-byte text.
+function stripControl(value) {
+	return String(value || "").replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g, "");
+}
+
+// A short, deterministic digest folded into the record file name. sanitize()
+// caps at 80 characters, so two session ids that share that prefix would
+// otherwise publish to the same record and one stopSession() would delete the
+// other's file.
+function shortHash(value) {
+	return createHash("sha1").update(String(value)).digest("hex").slice(0, 8);
+}
+
+function validWindowAddress(value) {
+	const address = String(value || "");
+	return /^0x[0-9a-fA-F]{1,16}$/.test(address) ? address : "";
+}
+
 // The 64 KiB the reader accepts, enforced on this side too: the record is a
 // fixed small object, and one that the reader would refuse is never written.
 const MAX_RECORD_BYTES = 65536;
 
 function truncate(text, limit) {
-	const value = String(text || "").replace(/\s+/g, " ").trim();
+	const value = stripControl(text).replace(/\s+/g, " ").trim();
 	if (value.length <= limit) return value;
 	let cut = value.slice(0, limit - 1).trimEnd();
 	// Never keep half of a surrogate pair; a lone surrogate reaches Qt as a
@@ -214,6 +235,26 @@ function herdrPane() {
 	return /^[A-Za-z0-9:_.-]{1,64}$/.test(pane) ? pane : "";
 }
 
+// The tmux pane pi runs in, read from the environment tmux injects. Empty when
+// pi is not inside tmux. tmux writes the id as '%' followed by digits, and a
+// value from anywhere else is dropped rather than written to the record, so
+// only a shape tmux itself produces can reach the click command.
+function tmuxPane() {
+	const pane = String(process.env.TMUX_PANE || "");
+	return /^%[0-9]{1,6}$/.test(pane) ? pane : "";
+}
+
+// The tmux server socket, the first field of $TMUX
+// ("<socket>,<pid>,<session>"). Empty means the default server. Only a plain
+// absolute path is kept; a socket that is not one is dropped, because the pane
+// id alone still focuses the default server while a stray string would ride
+// into the click command.
+function tmuxSocket() {
+	if (tmuxPane() === "") return "";
+	const socket = String(process.env.TMUX || "").split(",")[0];
+	return /^\/[A-Za-z0-9._/-]{0,255}$/.test(socket) ? socket : "";
+}
+
 function resolveWindow() {
 	try {
 		const raw = execFileSync("hyprctl", ["-j", "clients"], {
@@ -231,9 +272,11 @@ function resolveWindow() {
 			}
 		}
 		if (matches.length === 0) {
-			// Herdr panes have no terminal window in their ancestry. The prompt
-			// was submitted from the herdr UI, so the focused window is it.
-			return herdrPane() !== "" ? activeWindowAddress() : "";
+			// A multiplexer pane has no terminal window in its ancestry: herdr
+			// panes are parented to the herdr server, a tmux pane to the tmux
+			// server. The prompt was submitted from the client, so the focused
+			// window is it.
+			return herdrPane() !== "" || tmuxPane() !== "" ? activeWindowAddress() : "";
 		}
 		if (matches.length === 1) return String(matches[0].address || "");
 		// A single-instance terminal (ghostty, kitty) reports one pid for every
@@ -417,19 +460,23 @@ function startSession(pi, ctx) {
 	try {
 		// Capped like every other writer: a record is a fixed small object, and
 		// the shell re-reads and re-renders it on every scan.
-		name = String(pi?.getSessionName?.() || "").slice(0, 80);
+		name = stripControl(pi?.getSessionName?.() || "").slice(0, 80);
 	} catch {
 		name = "";
 	}
 
 	// Capped like bin/muster-report: the shell re-reads and re-renders this on
 	// every scan, and a path longer than this is not a path worth showing.
-	const cwd = String(ctx?.cwd || process.cwd() || "").slice(0, 1024);
-	recordFile = join(stateDir(), `${AGENT}-${sanitize(sessionId || process.pid)}.json`);
+	const cwd = stripControl(ctx?.cwd || process.cwd() || "").slice(0, 1024);
+	// The file name carries a short hash of the session id, so it cannot collide
+	// with bin/muster-report's `<agent>~<session>.json` or with another id that
+	// sanitises to the same prefix; the bridge is the only writer for it.
+	const sessionKey = sessionId || String(process.pid);
+	recordFile = join(stateDir(), `${AGENT}-${sanitize(sessionKey)}-${shortHash(sessionKey)}.json`);
 	record = {
 		schemaVersion: SCHEMA_VERSION,
 		agent: AGENT,
-		sessionId: (sessionId || String(process.pid)).slice(0, 120),
+		sessionId: stripControl(sessionId || String(process.pid)).slice(0, 120),
 		name,
 		cwd,
 		project: basename(cwd).slice(0, 256),
@@ -439,8 +486,10 @@ function startSession(pi, ctx) {
 		recordId: "",
 		message: "",
 		pid: process.pid,
-		windowAddress: resolveWindow(),
+		windowAddress: validWindowAddress(resolveWindow()),
 		herdrPane: herdrPane(),
+		tmuxPane: tmuxPane(),
+		tmuxSocket: tmuxSocket(),
 		updatedAt: Date.now(),
 		completedRuns: 0,
 		lastPrompt: truncate(lastUserPrompt(ctx), 240),
@@ -461,7 +510,10 @@ function stopSession() {
 		heartbeat = null;
 	}
 	emitClear();
-	if (recordFile) {
+	// Only clean up inside the directory that was vetted at session start. If it
+	// was replaced since, this path names someone else's directory and the unlink
+	// would delete a record there.
+	if (recordFile && stateDirIsPinned()) {
 		try {
 			rmSync(recordFile, { force: true });
 		} catch {
@@ -524,7 +576,7 @@ export default function (pi) {
 		// Capped like the name in startSession: an uncapped rename would push the
 		// record past the reader's 64 KiB limit and make the session vanish from
 		// the widget with no diagnostic.
-		touch({ name: String(event?.name || "").slice(0, 80) });
+		touch({ name: stripControl(event?.name || "").slice(0, 80) });
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -535,8 +587,10 @@ export default function (pi) {
 		// terminal's per-window address that the chain alone cannot pick.
 		setState("working", {
 			lastPrompt: truncate(event?.prompt, 240),
-			windowAddress: resolveWindow(),
+			windowAddress: validWindowAddress(resolveWindow()),
 			herdrPane: herdrPane(),
+			tmuxPane: tmuxPane(),
+			tmuxSocket: tmuxSocket(),
 		});
 	});
 

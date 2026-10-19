@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -17,9 +18,9 @@ Panel {
   property var hostWidget: null
   property var service: null
 
-  readonly property color contentForeground: bar ? bar.foreground : Color.foreground
-  readonly property color accentColor: Color.accent
-  readonly property color urgentColor: bar ? bar.urgent : Color.urgent
+  readonly property color contentForeground: bar ? bar.foreground : Commons.Color.foreground
+  readonly property color accentColor: Commons.Color.accent
+  readonly property color urgentColor: bar ? bar.urgent : Commons.Color.urgent
   readonly property color dimColor: Qt.darker(contentForeground, 1.35)
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
 
@@ -313,8 +314,9 @@ Panel {
     Text {
       anchors.centerIn: parent
       text: tile.label
+      textFormat: Text.PlainText
       color: tile.checked
-        ? (root.bar && root.bar.background ? root.bar.background : Color.background)
+        ? (root.bar && root.bar.background ? root.bar.background : Commons.Color.background)
         : root.contentForeground
       font.family: root.contentFontFamily
       font.pixelSize: Style.font.bodySmall
@@ -397,6 +399,7 @@ Panel {
             width: parent.width
             visible: root.sessions.length === 0
             text: "No agent sessions.\nRecords are read from ~/.local/state/omarchy/muster/sessions/ — an agent appears here once its bridge or hook writes one."
+            textFormat: Text.PlainText
             color: root.dimColor
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.bodySmall
