@@ -190,9 +190,14 @@ else
   record optional "pi bridge" "link pi/muster.ts into $HOME/.pi/agent/extensions/ (only needed for pi)"
 fi
 
-for tool in bash jq flock stat dd mv chmod tr cut date wc awk cat rm head od sed base64; do
+for tool in bash jq flock stat dd mv chmod tr cut date wc awk cat rm head od; do
   have "$tool" "muster-report writes records and OSC 7501 reports with it"
 done
+# The protocol's free-text fields arrive base64 encoded and every text field
+# is stripped of its control bytes before it is written, so these two are not
+# optional for a writer that speaks OSC 7501.
+have base64 "decoding the OSC 7501 title and msg"
+have sed "stripping the control bytes out of the text fields"
 # The optional pty receiver: an agent that already emits OSC 7501 needs no hook,
 # only bin/muster-tap, which is Python. Nothing else in the plugin does.
 have python3 "running an OSC 7501 agent with no hook (bin/muster-tap)" optional

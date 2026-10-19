@@ -185,6 +185,8 @@ BarWidget {
           state: session.state,
           kind: session.kind,
           progress: session.progress,
+          recordId: session.recordId,
+          terminalId: session.terminalId,
           folder: Model.folderLabel(session),
           pid: session.pid,
           completedRuns: session.completedRuns,

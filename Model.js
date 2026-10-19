@@ -202,18 +202,33 @@ function normalizeRecord(raw, path) {
   if (STATES.indexOf(state) === -1) state = "unknown"
 
   // kind is only meaningful for blocked; an unrecognised value is treated as
-  // absent, the way the spec says.
+  // absent, the way the spec says — and so is a recognised value reported for
+  // any other state, because the pair is a reason for waiting and elsewhere it
+  // is stale data that would outlive the state that gave it meaning.
   var kind = asText(raw.kind).toLowerCase()
-  if (KINDS.indexOf(kind) === -1) kind = ""
+  if (state !== "blocked" || KINDS.indexOf(kind) === -1) kind = ""
 
-  // progress is an integer 0..100; anything else is absent (-1).
+  // progress is an integer 0..100; anything else is absent (-1). A record not
+  // working or blocked has no run in flight, so a progress value on it is kept
+  // from an earlier state and is dropped the same way.
   var progress = toNumber(raw.progress, -1)
-  progress = (progress >= 0 && progress <= 100) ? Math.round(progress) : -1
+  progress = ((state === "working" || state === "blocked")
+    && progress >= 0 && progress <= 100) ? Math.round(progress) : -1
 
   // Protocol `id` is hierarchical (build/test). It is only ever a display
   // label: it names no file and reaches no command line, and it is capped and
-  // stripped like every other untrusted string.
-  var recordId = printable(raw.recordId !== undefined ? raw.recordId : raw.id, 128).trim()
+  // stripped like every other untrusted string. The cap is the spec's wire
+  // limit (8 x 32-char segments + 7 separators = 263), so a conforming id is
+  // never shortened.
+  var recordId = printable(raw.recordId !== undefined ? raw.recordId : raw.id, 263).trim()
+
+  // Protocol `terminalId`: a stable id for the pty/tap instance that owns the
+  // record. It is validated as a whole against the writer's charset, which
+  // excludes whitespace, separators and control characters, so the value can
+  // key a session without any escaping. Anything else — absent, empty, or a
+  // shape the contract does not promise — is the empty string.
+  var terminalId = asText(raw.terminalId)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(terminalId)) terminalId = ""
 
   var cwd = printable(raw.cwd, 1024)
   var declared = printable(raw.project, 256)
@@ -228,13 +243,19 @@ function normalizeRecord(raw, path) {
     agentIcon: meta.icon,
     agentFont: meta.font,
     name: name,
-    title: name !== "" ? name : (project !== "" ? project : meta.label),
+    // A record with no name still deserves a title: the protocol's `id` is
+    // the identity the record chose for itself, and with several records per
+    // terminal it is what tells two otherwise identical cards apart. Project
+    // and agent label stay the later fallbacks they were.
+    title: name !== "" ? name : (recordId !== "" ? recordId
+      : (project !== "" ? project : meta.label)),
     cwd: cwd,
     project: project,
     state: state,
     kind: kind,
     progress: progress,
     recordId: recordId,
+    terminalId: terminalId,
     message: message,
     lastPrompt: printable(raw.lastPrompt, 240),
     pid: toNumber(raw.pid, 0),

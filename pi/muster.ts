@@ -11,6 +11,11 @@
 // is a first-class agent to the widget — see bin/muster-report for a
 // shell-friendly writer aimed at the other agents omarchy ships.
 //
+// The bridge also knows how to write the protocol sequence to the terminal,
+// but that is opt-in (MUSTER_EMIT_OSC=1) and off by default: pi 1.1.0 and
+// later emit OSC 7501 themselves, and two writers for one session means two
+// records for one run. See the OSC 7501 section below.
+//
 // State mapping:
 //   working  → a run is in flight
 //   blocked  → pi is waiting on a user-facing prompt
@@ -384,10 +389,32 @@ function touch(extra) {
 // ------------------------------------------------------------- OSC 7501
 //
 // Muster speaks the Program Status Protocol. Alongside the record — which the
-// Omarchy bar reads — pi also writes the same state to its terminal as an
-// OSC 7501 sequence, so any terminal that understands it (Rex today, Ghostty
-// and others later) shows the session too. The spec:
+// Omarchy bar reads — the bridge can write the same state to its terminal as
+// an OSC 7501 sequence, so any terminal that understands it (Rex today, Kitty
+// on master, others later) shows the session too. The spec:
 //   https://www.superlogical.com/rex/docs/build/program-status
+//
+// It is OFF by default, and MUSTER_EMIT_OSC=1 turns it on.
+//
+// The reason is the native-emitter era: pi 1.1.0 (2026-10-07) and later emit
+// the protocol themselves — probe-gated, so a terminal has to answer
+// `OSC 7501;?` first, and PI_PROGRAM_STATUS=1 forces it on. A bridge that
+// emitted as well would report the same run twice: the terminal keeps one
+// record per id, and a tap sitting in the pty path would see the same root
+// report twice and file two records for one session. So the default bridge
+// writes the JSON record and nothing else; one source per session.
+//
+// The bridge's own emission is still useful, and is what MUSTER_EMIT_OSC=1 is
+// for:
+//   - pi older than 1.1.0 has no native reporter, and the terminal would
+//     otherwise show nothing at all;
+//   - a session where the native reporter is off (PI_PROGRAM_STATUS=0) but
+//     the terminal still understands the protocol;
+//   - a terminal that answers the probe but shows nothing, where the bridge's
+//     own sequence is the only report it will ever see.
+// Do not combine it with `muster-tap` on the same pi session: the tap would
+// pick up the bridge's sequence and file a second record next to the one the
+// bridge already writes.
 //
 // The write goes straight to /dev/tty rather than through pi's renderer: the
 // sequence is zero-width and a terminal that does not know it ignores it, but
@@ -412,7 +439,16 @@ function base64(text) {
 	return Buffer.from(String(text), "utf8").toString("base64");
 }
 
+// The bridge's OSC 7501 emission is opt-in. MUSTER_EMIT_OSC=1 enables it and
+// nothing else does: a value that is not exactly "1" leaves the bridge on the
+// record only, so a stray MUSTER_EMIT_OSC=true in the environment cannot
+// silently turn a second writer on for a pi that already reports natively.
+function oscEnabled() {
+	return String(process.env.MUSTER_EMIT_OSC || "") === "1";
+}
+
 function emitOsc() {
+	if (!oscEnabled()) return;
 	const fd = tty();
 	if (fd < 0 || !record) return;
 	const state = STATE_WORDS.has(record.state) ? record.state : "working";
@@ -431,8 +467,11 @@ function emitOsc() {
 }
 
 // Leaving the terminal: drop the live record the way the protocol says process
-// exit does, and clear it on the terminal so the two stay in step.
+// exit does, and clear it on the terminal so the two stay in step. The clear
+// is only written when the bridge's own emission is on (MUSTER_EMIT_OSC=1) —
+// otherwise there is nothing on the terminal to clear.
 function emitClear() {
+	if (!oscEnabled()) return;
 	const fd = tty();
 	if (fd < 0) return;
 	try {
@@ -535,10 +574,10 @@ export default function (pi) {
 		return rootSession && ctx?.mode === "tui";
 	}
 
-	// Every state change publishes to both sinks: the record the bar reads, and
-	// the OSC 7501 sequence the terminal reads. `kind` and `message` are cleared
-	// unless the caller sets them, so a stale permission reason never rides on a
-	// later `working`.
+	// Every state change publishes to the record the bar reads, and — only with
+	// MUSTER_EMIT_OSC=1 — to the OSC 7501 sequence the terminal reads. `kind` and
+	// `message` are cleared unless the caller sets them, so a stale permission
+	// reason never rides on a later `working`.
 	function setState(state, extra) {
 		if (!record) return;
 		touch({ state, message: "", kind: "", ...extra });

@@ -567,7 +567,16 @@ Item {
         delete root._acknowledged[session.path]
       }
       if (Model.isStale(session, now, root.staleAfterSec, root.settledAfterSec)) continue
-      var key = session.pid > 0 ? ("pid:" + session.pid) : ("path:" + session.path)
+      // One live session per agent process — unless a terminal owns several
+      // records at once: bin/muster-tap can emit multiple OSC 7501 records
+      // under one pid, and keying those by pid would collapse them into a
+      // single card. A record that names its terminal is keyed by terminal +
+      // record identity instead, so each keeps its own card; records without
+      // a terminal id keep the old pid/path rule. JSON.stringify keeps the
+      // key unambiguous — a recordId may contain any separator character.
+      var key = session.terminalId !== ""
+        ? JSON.stringify(["term", session.terminalId, session.recordId, session.path])
+        : (session.pid > 0 ? ("pid:" + session.pid) : ("path:" + session.path))
       var existing = byKey[key]
       if (!existing) {
         byKey[key] = session
@@ -601,7 +610,8 @@ Item {
       var session = list[i]
       parts.push(JSON.stringify([session.path, session.agent, session.state,
         session.kind, session.progress, session.completedRuns, session.updatedAt,
-        session.name, session.message, session.lastPrompt, session.cwd, session.project]))
+        session.name, session.message, session.lastPrompt, session.cwd, session.project,
+        session.recordId, session.terminalId]))
     }
     return parts.join("\n")
   }

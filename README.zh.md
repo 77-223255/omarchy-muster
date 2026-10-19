@@ -5,10 +5,16 @@
 > [!WARNING]
 > **OSC 7501 早期想法验证 —— 不可用,未发布。**
 > 这个分支只是存放一个想法:Muster 如果端到端说程序状态协议(OSC 7501)会长什么样。
-> 协议本身尚未落地 —— 只有 libghostty-vt 解析,Ghostty 应用直接忽略,也没有任何
-> agent 正式发布 —— 所以这里大部分东西现在根本跑不起来。record 契约、写入器、UI
-> 都会有大量破坏性更改,而且本身也不完善。请勿安装或依赖这个分支,用 `main`。
-> 草图见 [`docs/osc7501.md`](docs/osc7501.md)。
+> 协议本身已经落地:截至 2026-10-19,已经有多个 agent 正式发布 —— Claude Code
+> 2.1.295+、pi 1.1.0+、Crush 0.98+、omp 18.8.7+;Codex 已合并并发布(0.163.0),
+> Docker Agent 1.150.0 与 Factory Droid 0.236.0 紧随其后;opencode 与 Gemini CLI
+> 还在等。终端这一侧:Kitty 的 master 已经有了,Ghostty 1.3.1 应用还没有(只有 main
+> 上的 libghostty-vt 会解析),tmux 与 Herdr 直接丢弃序列而不转发。Muster 是状态栏
+> 消费端,而协议没有读取 API —— 记录只存在终端里 —— 所以 Muster 仍然需要
+> `muster-tap` 或 hook 才能看到会话。record 契约、写入器、UI 都会有大量破坏性更改,
+> 而且本身也不完善。请勿安装或依赖这个分支,用 `main`。草图见
+> [`docs/osc7501.md`](docs/osc7501.md),支持矩阵见
+> [`docs/native-emitters.md`](docs/native-emitters.md)。
 
 在 Omarchy 状态栏里看住你的 coding agent:谁在跑、谁在等你、谁刚干完活 ——
 完成时还有提示音和系统弹窗;不要求任何终端复用器,而用了 tmux 或 herdr 时,
@@ -50,8 +56,15 @@
 监听目录),要么在自己的 pty 上直接发这个协议序列(由 `bin/muster-tap` 转成同样的
 记录)。状态从不来自窗口标题或进程列表,也没有规则引擎 —— 没有任何会猜错状态、或者
 悄悄失效的东西。(写记录时会沿父进程链查一次窗口 id,但那只是为了让点击能聚焦到
-正确的终端,从不参与判断状态。)自带的 pi 桥接上报精确的状态、同时发出协议序列,
-外加一个 `completedRuns` 计数器,让“刚跑完一次”不可能被漏掉。
+正确的终端,从不参与判断状态。)自带的 pi 桥接上报精确的状态,外加一个
+`completedRuns` 计数器,让“刚跑完一次”不可能被漏掉;它只有在显式要求时
+(`MUSTER_EMIT_OSC=1`)才把协议序列写给终端 —— 因为 pi 1.1.0 起自己就会发,
+一个会话两个写入者就意味着一次运行两条记录。
+
+已经会说这个协议的 agent(Claude Code 2.1.295+、pi 1.1.0+、Crush 0.98+、
+omp 18.8.7+、Codex 0.163.0+ 等)根本不需要任何 per-agent 代码:用 `bin/muster-tap`
+跑它们,上报就变成记录。矩阵(含上游证据)见
+[`docs/native-emitters.md`](docs/native-emitters.md)。
 
 所以接入别的 agent 同样是精确的:上报状态即可,见下面的「接入其它 agent」,映射表在
 [`docs/osc7501.md`](docs/osc7501.md)。
@@ -75,6 +88,12 @@ ln -sfn ~/.config/omarchy/plugins/shienze.muster/pi/muster.ts \
 
 桥接要**重启 pi** 才会加载。改 `.qml` 是热重载的,但 `Model.js` 是 QML 缓存的库,
 和 IPC 目标一样要 `omarchy restart shell` 才会更新。
+
+桥接只写会话记录,别的什么都不做。pi 1.1.0 起自己就会发 OSC 7501,所以桥接自己
+往终端写序列这一层**默认关闭**;跑比 1.1.0 更老的 pi 时,或者想让桥接成为线上
+唯一的写入者时,用 `MUSTER_EMIT_OSC=1` 打开。别让同一个 pi 一边开着这个开关、
+一边跑在 `muster-tap` 下面:tap 会看到桥接发的序列,于是在桥接自己那条记录旁边
+再多记一条。一个会话只留一个来源。
 
 ### 从源码目录开发
 
@@ -154,8 +173,10 @@ record 由同一次打开独占创建并写入(`O_EXCL`)之后再原子改名—
 命令行参数传并持久化,放进提醒就会从 `/proc/<pid>/cmdline` 泄漏、也会留在磁盘上
 ([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209),
 修复 [#8259](https://github.com/basecamp/omarchy/pull/8259) 待合并)。带正文的那版
-原样注释保留在 `Service.qml` 里;要启用就删掉安全的 `notificationCommand`、取消
-下面那块的注释,然后 `omarchy restart shell`。
+是 `notifyContent` 设置,默认关闭:在 `~/.config/omarchy/shell.json` 里打开(或在
+omarchy 自己的设置界面里,它读的是 manifest 里的 schema),提醒就会带上会话标题和
+最后一条 prompt。做成设置而不是改源码,是因为源码改动下次更新就没了,而这个隐私
+取舍应该由你自己明确做。
 
 ## 用法
 
@@ -174,12 +195,15 @@ omarchy-shell shienze.muster status | jq '.details[]'
 
 ## 设置
 
-只有两个开关,面板里可以点,也存在 `~/.config/omarchy/shell.json`:
+三个设置,存在 `~/.config/omarchy/shell.json`:
 
 | 键 | 默认 | 含义 |
 |-----|---------|------|
 | `soundEnabled` | `true` | 运行结束时响一声 |
 | `notifyEnabled` | `true` | 运行结束时发系统通知 |
+| `notifyContent` | `false` | 提醒正文里带上会话标题和最后一条 prompt(它会走 omarchy 通知链的命令行与日志,见「通知内容」) |
+
+前两个是面板里的开关;第三个在 manifest 里声明,omarchy 自己的设置界面也会列出它。
 
 其余参数**刻意写死在代码里** —— 一个因为某个歪设置而悄悄不响的部件,比一个需要
 改一行代码才能调的要糟得多。它们在 `Service.qml` 顶部:
@@ -188,6 +212,7 @@ omarchy-shell shienze.muster status | jq '.details[]'
 |----------|-------|---------|
 | `refreshIntervalSec` | `2` | 备用扫描间隔;装了 `inotifywait` 后新记录会立刻出现 |
 | `staleAfterSec` | `120` | 多久没心跳就忘掉一条记录(桥接每 30s 心跳一次) |
+| `settledAfterSec` | `21600` | 落定(`done`/`error`)的记录留六小时 —— 会自己收尾的写入者(pi 桥接)用不上这个 |
 | `debounceMs` | `2000` | 多个会话同时结束只提醒一次 |
 | `soundFile` | freedesktop `complete.oga` | |
 | `soundPlayer` | `paplay` | `pw-play` / `mpv` 也行 |
@@ -207,6 +232,7 @@ omarchy-shell shienze.muster status | jq '.details[]'
 | `kind` | `blocked` 时为 `permission` \| `question` \| `auth` |
 | `progress` | 整数 `0`–`100`,缺省为 `-1` |
 | `recordId` | 协议的层级 `id`(`build/test`),仅用于显示 |
+| `terminalId` | 拥有这条记录的 pty/tap 实例的稳定 id(`tap:<pid>`);存在时,会话按它加 `recordId` 归并,所以一个 tap 可以同时拥有多条记录 |
 | `message` | 协议的 `msg`;`blocked`、`done`、`error` 时显示 |
 | `lastPrompt` | 显示在卡片上 |
 | `pid` | 归属进程;也是去重依据(同 pid 的多条只留最新) |
@@ -264,8 +290,17 @@ omarchy-shell shienze.muster status | jq '.details[]'
 ```
 
 `muster-tap` 原样转发 agent 的输出,把它看到的每条上报转成记录 —— 已经会说协议的
-agent 因此不需要任何 per-agent 代码。它自己回应协议的探测查询,并在 agent 退出时
-删掉“进行中”的记录(`done`/`error` 会保留下来)。
+agent 因此不需要任何 per-agent 代码,而现在这样的 agent 已经有好几个了
+(Claude Code 2.1.295+、pi 1.1.0+、Crush 0.98+、omp 18.8.7+、Codex 0.163.0+;见
+[`docs/native-emitters.md`](docs/native-emitters.md))。它自己回应协议的探测查询,
+所以那些要等终端确认才发上报的 agent,在不回答的终端下也照发 —— Ghostty 1.3.1
+就是这种,tmux 和 Herdr 则是干脆把序列丢掉。它在 agent 退出时删掉“进行中”的记录
+(`done`/`error` 会保留下来)。
+
+**一个会话只留一个来源。** 如果 agent 自己就会发协议,那 tap 就是那个来源:别再为
+同一个会话同时挂 hook 或打开 pi 桥接的 OSC 发送,否则一次运行会变成两条记录。
+pi 桥接默认只写自己的记录,正是这个原因;它自己往终端发那一层要显式开
+`MUSTER_EMIT_OSC=1`。
 
 hook 也可以把协议正文直接交给写入器:
 
@@ -274,8 +309,8 @@ printf '%s' "$OSC_BODY" | $report --agent claude --session "$ID" \
         --osc-fd 0 --emit-osc tty
 ```
 
-`--emit-osc tty` 会把同一条上报回写到终端,让支持 OSC 7501 的终端(目前是 Rex)
-也亮起来。
+`--emit-osc tty` 会把同一条上报回写到终端,让支持 OSC 7501 的终端(目前是 Rex,
+以及 master 上的 Kitty)也亮起来。
 
 ### 记录方式
 
@@ -376,11 +411,12 @@ $report --agent claude --session "$SESSION_ID" --remove
 | `Panel.qml` | 会话面板和两个开关 |
 | `Record.qml` | 单条记录的文件监听 |
 | `Model.js` | 记录归一化、排序、agent 名字与标记 |
-| `pi/muster.ts` | pi → 记录 + OSC 7501 桥接 |
+| `pi/muster.ts` | pi → 记录 + OSC 7501 桥接(OSC 部分要显式开:`MUSTER_EMIT_OSC=1`) |
 | `bin/muster-report` | 给其它 agent 的记录写入器与 OSC 7501 前端 |
 | `bin/muster-tap` | 可选的 pty 接收器:把线上的 OSC 7501 转成记录 |
 | `bin/muster-doctor` | 依赖体检 |
 | `docs/osc7501.md` | Muster 如何说程序状态协议 |
+| `docs/native-emitters.md` | 今天谁在说 OSC 7501:版本、日期与上游证据 |
 | `assets/` | README 截图 |
 | `preview.png` | 市场列表卡片(可选,放根目录) |
 | `docs/submission-body.md` | 提交 issue 的正文 |

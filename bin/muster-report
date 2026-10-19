@@ -12,6 +12,17 @@
 # report is written back to a terminal as a real OSC 7501 sequence, so any
 # consumer (Rex today, Ghostty and others later) sees it too.
 #
+# A body that arrives on --osc-fd is a report in the spec's sense, and the
+# spec's rules for it are followed exactly: it is parsed, then validated as a
+# whole, and only then applied. A report is published in full or not at all.
+# A report without a state is ignored — the spec never says "assume
+# working", and a default would invent a run that never started. A report
+# whose title or msg does not decode, decodes to a control character or is
+# over the spec's limit is discarded whole: a card that shows a state
+# without its text says something the program never said. An unknown kind
+# and a progress that is not an integer in 0..100 are absent, not fatal;
+# the spec says so, and they do not invalidate the rest of the report.
+#
 # Nothing a caller types may travel as an argument. A process's argv is
 # world-readable through /proc/<pid>/cmdline while it runs, so the only options
 # that take text here take a descriptor: --prompt-fd, --message-fd, --name-fd,
@@ -40,6 +51,10 @@
 #   # gone
 #   muster-report --agent claude --session "$ID" --remove
 #
+#   # a record that belongs to a pty (the tap writes "tap:<pid>")
+#   muster-report --agent claude --session "$ID" --terminal-id tap:4711 \
+#     --state working
+#
 # `--agent` takes any id omarchy ships (pi, omp, opencode, claude, codex, crush,
 # grok, gemini, openclaw, hermes, copilot, muse, cursor-agent) plus their
 # aliases; an unknown id still works and gets the generic mark. It may instead
@@ -58,17 +73,28 @@ usage() {
 Usage: muster-report --agent <id> --session <id> [options]
 
   --state <idle|working|done|blocked|error|clear|unknown>
-                       Session state (default: working). `done` and `error`
-                       are the settled states: they trigger the alert, survive
-                       process exit, and are what a finished run reports.
-                       `clear` removes the record, like --remove.
+                       Session state (default: working for a plain command
+                       line call). `done` and `error` are the settled
+                       states: they trigger the alert, survive process exit,
+                       and are what a finished run reports. `clear` removes
+                       the record, like --remove. A body read from --osc-fd
+                       must carry its own state: a report without one is
+                       ignored, never defaulted.
   --kind <permission|question|auth>
                        Why a `blocked` session is waiting (OSC 7501 kind).
   --progress <0-100>   Progress for a working/blocked session.
   --record-id <id>     OSC 7501 record id, e.g. build/test.
+  --terminal-id <id>   The pty/tap that owns the record, e.g. tap:4711
+                       (default: $MUSTER_TERMINAL_ID; empty = absent).
   --osc-fd <n>         Read an OSC 7501 key=value body from descriptor n and
-                       take state/kind/progress/id/app/title/msg from it.
+                       take state/kind/progress/id/app/title/msg from it. The
+                       body is validated as a whole: a report that breaks the
+                       spec's grammar or its limits is discarded, and nothing
+                       is written.
   --emit-osc <fd|tty>  Write the report to a terminal as an OSC 7501 sequence.
+                       A removal is emitted as `state=clear`, and kind and
+                       progress are only emitted for a working or blocked
+                       report.
   --name-fd <n>        Read the display name from descriptor n (never argv)
   --cwd-fd <n>         Read the working directory from descriptor n (never argv)
   --prompt-fd <n>      Read the last prompt from descriptor n (never argv)
@@ -86,6 +112,7 @@ Usage: muster-report --agent <id> --session <id> [options]
 
 Environment:
   XDG_STATE_HOME       Defaults to ~/.local/state
+  MUSTER_TERMINAL_ID   Used as --terminal-id when the option is not given
   HERDR_PANE_ID        Picked up as --herdr-pane when HERDR_ENV=1
   TMUX, TMUX_PANE      Picked up as --tmux-socket and --tmux-pane when in tmux
 USAGE
@@ -102,6 +129,8 @@ state=""
 kind=""
 progress=""
 record_id=""
+terminal_id=""
+terminal_id_from_env=0
 name=""
 cwd="$PWD"
 prompt=""
@@ -137,6 +166,7 @@ while (($# > 0)); do
   --kind) kind="${2:-}"; shift 2 || fail "--kind needs a value" ;;
   --progress) progress="${2:-}"; shift 2 || fail "--progress needs a value" ;;
   --record-id) record_id="${2:-}"; shift 2 || fail "--record-id needs a value" ;;
+  --terminal-id) terminal_id="${2:-}"; shift 2 || fail "--terminal-id needs a value" ;;
   --name-fd) name_fd="${2:-}"; shift 2 || fail "--name-fd needs a value" ;;
   --cwd-fd) cwd_fd="${2:-}"; shift 2 || fail "--cwd-fd needs a value" ;;
   --prompt-fd) prompt_fd="${2:-}"; shift 2 || fail "--prompt-fd needs a value" ;;
@@ -164,16 +194,49 @@ done
 # descriptor instead: a process's argv is world-readable through
 # /proc/<pid>/cmdline while it runs, and no file mode can protect a value
 # handed over that way. `read` is a shell builtin, and each read is capped so
-# neither the shell nor the record can grow without bound.
+# neither the shell nor the record can grow without bound. The cap is a byte
+# count, so the read runs in the C locale: a multibyte character must not buy
+# a caller extra bytes past the limit.
 read_fd() {
   local fd="$1" cap="$2" value=""
+  local LC_ALL=C
   IFS= read -r -N "$cap" value <&"$fd" 2>/dev/null || true
   printf '%s' "$value"
 }
 
+# The terminal id names the pty (or the tap) a record belongs to. It keys a
+# session in the reader, so it is an id and not text: it is held to a plain
+# charset and never carries anything else. An explicit value that does not
+# fit is a mistake and is reported; the environment is only a hint, so an
+# unusable one is dropped with a warning instead of failing every write.
+if [[ -z $terminal_id && -n ${MUSTER_TERMINAL_ID:-} ]]; then
+  terminal_id="$MUSTER_TERMINAL_ID"
+  terminal_id_from_env=1
+fi
+if [[ -n $terminal_id && ! $terminal_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$ ]]; then
+  if ((terminal_id_from_env)); then
+    echo "muster-report: MUSTER_TERMINAL_ID is not a terminal id; ignoring it" >&2
+    terminal_id=""
+  else
+    fail "--terminal-id must be an id: letters, digits, dot, dash, underscore, colon (max 64)"
+  fi
+fi
+
 # Free text and paths never reach a file name directly: a session id becomes
-# `<agent>-<session>.json`, so it is reduced to a plain, path-safe token first.
+# `<agent>~<session>.json`, so it is reduced to a plain, path-safe token first.
 sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
+
+# The session of a report that carries an id names the record file, so it has
+# to be a short plain token: a protocol id can be 263 bytes long and a file
+# name cannot be that. The raw id stays in the record as recordId, so nothing
+# is lost but the name.
+osc_session() {
+  local token
+  token=$(sanitize "$1" | cut -c1-64)
+  # An id of the shape the session uses starts with a letter or a digit.
+  [[ $token =~ ^[A-Za-z0-9] ]] || token="id${token:0:62}"
+  printf '%s' "$token"
+}
 
 [[ -z $prompt_fd || $prompt_fd =~ ^[0-9]+$ ]] ||
   fail "--prompt-fd must be a descriptor number"
@@ -189,22 +252,80 @@ sanitize() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-80; }
   fail "--emit-osc must be a descriptor number or \"tty\""
 
 # ------------------------------------------------------------- OSC 7501 in
+#
+# The wire format of the Program Status Protocol (spec rev 0.4): a report is
+# a ':'-separated list of key=value pairs. The three steps are kept apart —
+# parse the body, validate the whole report, then apply it — because a
+# report is published in full or not at all. A state without its text is a
+# card that says nothing, and the spec never says to publish half a report.
+#
+# These are the spec's limits. A report that breaks one of them is discarded
+# whole, never trimmed into something that says something else.
+OSC_MAX_BODY=4096
+OSC_MAX_KEY=16
+OSC_MAX_APP=32
+OSC_MAX_ID=263
+OSC_MAX_TITLE_ENC=256
+OSC_MAX_TITLE_DEC=192
+OSC_MAX_MSG_ENC=2732
+OSC_MAX_MSG_DEC=2048
+
+# Trim the whitespace around a key or a value — never inside one. The spec
+# removes the whitespace around a key and a value; a space inside a value is
+# outside the wire charset, so such a pair is malformed, not a value with
+# the space taken out.
+trim_space() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
 
 # Decode a protocol free-text value: standard base64 of UTF-8, padding
-# optional. A value that does not decode, or that decodes to a control
-# character, is dropped whole — the spec forbids control characters and a
-# newline in a project name would forge card text.
-osc_text() {
-  local encoded="$1" decoded
+# optional. The spec's rule is all-or-nothing, so a value that does not
+# decode, that decodes to a control character or that is over its limit
+# fails the whole report: the caller discards the report instead of
+# publishing a state without its text. The spec forbids control characters,
+# and a newline in a project name would forge card text.
+osc_decode() {
+  local encoded="$1" max_enc="$2" max_dec="$3" decoded raw
+  # The C locale: the limits are byte counts, and the control characters the
+  # spec forbids are C0, DEL and the C1 range. In a UTF-8 locale the byte of
+  # a multi-byte character can look like a control byte, and the C1 range is
+  # invisible to the locale's class, so both are checked as bytes here.
+  local LC_ALL=C
   [[ -n $encoded ]] || return 0
-  [[ $encoded =~ ^[A-Za-z0-9+/=]*$ ]] || return 0
-  decoded=$(printf '%s' "$encoded" | base64 -d 2>/dev/null) || return 0
-  [[ $decoded == *[[:cntrl:]]* ]] && return 0
+  ((${#encoded} <= max_enc)) || return 1
+  [[ $encoded =~ ^[A-Za-z0-9+/=]*$ ]] || return 1
+  # The trailing '.' is a sentinel: a command substitution eats a trailing
+  # newline, and a decoded newline is a control character that must not slip
+  # through the check below.
+  decoded=$(printf '%s' "$encoded" | base64 -d 2>/dev/null && printf '.') || return 1
+  decoded=${decoded%.}
+  raw=$(printf '%s' "$encoded" | base64 -d 2>/dev/null | wc -c) || return 1
+  ((raw <= max_dec)) || return 1
+  # A NUL byte cannot live in a shell variable — it is dropped on the way in
+  # — so a string shorter than the raw decode means that one was there.
+  ((raw == $(printf '%s' "$decoded" | wc -c))) || return 1
+  [[ $decoded != *[[:cntrl:]]* ]] || return 1
+  # The C1 controls (U+0080-U+009F) are two-byte sequences in UTF-8, so the
+  # class above never sees them: they are matched as bytes.
+  [[ $decoded != *$'\xc2'[$'\x80'-$'\x9f']* ]] || return 1
   printf '%s' "$decoded"
 }
 
+osc_state="" osc_kind="" osc_progress="" osc_app="" osc_id=""
+osc_title="" osc_msg="" osc_title_text="" osc_msg_text=""
+
 if [[ -n $osc_fd ]]; then
-  raw_osc=$(read_fd "$osc_fd" 4096)
+  # ---------------------------------------------------------- 1. parse
+  # The body is read with room for the sequence wrapper, so a body that is
+  # too long is noticed instead of being truncated into a valid-looking
+  # report.
+  raw_osc=$(read_fd "$osc_fd" $((OSC_MAX_BODY + 16)))
+  osc_raw_bytes=$(printf '%s' "$raw_osc" | wc -c)
+  ((osc_raw_bytes < OSC_MAX_BODY + 16)) ||
+    fail "the --osc-fd body is over the $OSC_MAX_BODY bytes the spec allows; the report is discarded"
   # Accept either the bare body ("state=…:…") or a whole sequence, so a hook
   # can pipe the very bytes it wrote to its tty straight through. Trailing BEL
   # or ESC \ is stripped; anything the caller leaves is an unknown pair and is
@@ -212,19 +333,34 @@ if [[ -n $osc_fd ]]; then
   raw_osc=${raw_osc#$'\033]7501;'}
   raw_osc=${raw_osc%$'\033\\'}
   raw_osc=${raw_osc%$'\a'}
-  osc_state="" osc_kind="" osc_progress="" osc_app="" osc_id="" osc_title="" osc_msg=""
+  osc_body_bytes=$(printf '%s' "$raw_osc" | wc -c)
+  ((osc_body_bytes <= OSC_MAX_BODY)) ||
+    fail "the --osc-fd body is over the $OSC_MAX_BODY bytes the spec allows; the report is discarded"
   # Pairs are ':'-separated, and the value charset excludes ':' and ';', so a
   # plain split is exact. A malformed pair is skipped; the rest still applies.
   # Unknown keys are ignored — that is how the protocol extends.
-  IFS=':' read -r -a osc_pairs <<<"$raw_osc" || true
-  for pair in "${osc_pairs[@]}"; do
-    [[ $pair == *=* ]] || continue
-    key=${pair%%=*}
-    val=${pair#*=}
-    # The spec removes whitespace around keys and values. A value's own charset
-    # excludes space, so stripping it cannot lose anything that was meant.
-    key=${key//[[:space:]]/}
-    val=${val//[[:space:]]/}
+  osc_rest="$raw_osc"
+  while [[ -n $osc_rest ]]; do
+    if [[ $osc_rest == *:* ]]; then
+      osc_pair=${osc_rest%%:*}
+      osc_rest=${osc_rest#*:}
+    else
+      osc_pair=$osc_rest
+      osc_rest=""
+    fi
+    [[ $osc_pair == *=* ]] || continue
+    key=${osc_pair%%=*}
+    val=${osc_pair#*=}
+    # The spec removes whitespace around keys and values.
+    key=$(trim_space "$key")
+    val=$(trim_space "$val")
+    # A key is 1..16 lowercase letters; anything else is not a key.
+    ((${#key} <= OSC_MAX_KEY)) || continue
+    [[ $key =~ ^[a-z]+$ ]] || continue
+    # The value charset is what the wire allows. A value outside it makes the
+    # pair malformed, and a malformed pair is skipped.
+    [[ $val =~ ^[A-Za-z0-9_.,+/=-]*$ ]] || continue
+    # A repeated key keeps the last value.
     case "$key" in
     state) osc_state=$val ;;
     kind) osc_kind=$val ;;
@@ -235,20 +371,67 @@ if [[ -n $osc_fd ]]; then
     msg) osc_msg=$val ;;
     esac
   done
+
+  # --------------------------------------------------- 2. validate the whole
+  # A report without a state is ignored: the spec never says "assume
+  # working", and a default would invent a run that never started.
+  [[ -n $osc_state ]] ||
+    fail "the --osc-fd body has no state; a report without a state is ignored"
+  # A state the spec does not define is ignored as well.
+  case "$osc_state" in
+  idle | working | done | blocked | error | clear) ;;
+  *) fail "the --osc-fd body has the unknown state '$osc_state'; the report is ignored" ;;
+  esac
+  # An id that breaks the grammar breaks the whole report: the record would
+  # be filed under the wrong address, and a wrong record is worse than none.
+  if [[ -n $osc_id ]]; then
+    if ((${#osc_id} > OSC_MAX_ID)) ||
+      [[ ! $osc_id =~ ^[A-Za-z0-9_.+-]{1,32}(/[A-Za-z0-9_.+-]{1,32}){0,7}$ ]]; then
+      fail "the --osc-fd body has an invalid id; the report is ignored"
+    fi
+  fi
+  # The free-text fields are all-or-nothing: a value that does not decode,
+  # that decodes to a control character or that is over the spec's limit
+  # discards the whole report. Keeping the state and dropping only the text
+  # would publish a claim the program never made.
+  if ! osc_title_text=$(osc_decode "$osc_title" $OSC_MAX_TITLE_ENC $OSC_MAX_TITLE_DEC); then
+    fail "the --osc-fd body has a broken title; the report is discarded"
+  fi
+  if ! osc_msg_text=$(osc_decode "$osc_msg" $OSC_MAX_MSG_ENC $OSC_MAX_MSG_DEC); then
+    fail "the --osc-fd body has a broken msg; the report is discarded"
+  fi
+  # An unknown kind and a progress that is not an integer in 0..100 are
+  # absent: the spec says so, and they do not invalidate the rest of the
+  # report. An app that does not fit is absent for the same reason — it is a
+  # hint about which program is reporting, not the report itself.
+  case "$osc_kind" in
+  permission | question | auth) ;;
+  *) osc_kind="" ;;
+  esac
+  [[ $osc_progress =~ ^([0-9]|[1-9][0-9]|100)$ ]] || osc_progress=""
+  if [[ -n $osc_app ]] && { ((${#osc_app} > OSC_MAX_APP)) ||
+    [[ ! $osc_app =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; }; then
+    osc_app=""
+  fi
+
+  # ---------------------------------------------------------- 3. apply
   # Explicit options win; the body fills only what was not given.
   [[ -n $agent ]] || agent=$osc_app
   # A protocol id may contain `/` (build/test); the record file name must not,
   # so it is sanitized here and the raw id is kept in recordId below.
-  [[ -n $session ]] || session=$(sanitize "$osc_id")
+  [[ -n $session ]] || session=$(osc_session "$osc_id")
   [[ -n $record_id ]] || record_id=$osc_id
-  [[ -n $name ]] || name=$(osc_text "$osc_title")
-  [[ -n $message ]] || message=$(osc_text "$osc_msg")
+  [[ -n $name ]] || name=$osc_title_text
+  [[ -n $message ]] || message=$osc_msg_text
   [[ -n $kind ]] || kind=$osc_kind
   [[ -n $progress ]] || progress=$osc_progress
   [[ -n $state ]] || state=$osc_state
 fi
 
-state=${state:-working}
+# The default state belongs to a plain command line call. A report that
+# arrived on a descriptor has already been refused above when it carried no
+# state, so the default never invents a run that never started.
+[[ -n $state ]] || state=working
 
 [[ -n $agent ]] || fail "--agent is required (or app= in the --osc-fd body)"
 [[ -n $session ]] || fail "--session is required (or id= in the --osc-fd body)"
@@ -296,14 +479,16 @@ esac
 [[ $window =~ ^(auto|none|0x[0-9a-fA-F]{1,16})$ ]] ||
   fail "--window must be auto, none, or a window address like 0x5591a…"
 # Every stored field is capped so one record can never exceed the reader's cap
-# and the shell never holds an unbounded value.
-name=${name:0:80}
-message=${message:0:240}
+# and the shell never holds an unbounded value. The title and the message
+# carry the spec's own limits (192 and 2048 decoded bytes), so a conforming
+# report is never cut short; the reader may still show less of it.
+name=${name:0:192}
+message=${message:0:2048}
 cwd=${cwd:0:1024}
 
 [[ -n $prompt_fd ]] && prompt=$(read_fd "$prompt_fd" 240)
-[[ -n $message_fd ]] && message=$(read_fd "$message_fd" 240)
-[[ -n $name_fd ]] && name=$(read_fd "$name_fd" 80)
+[[ -n $message_fd ]] && message=$(read_fd "$message_fd" 2048)
+[[ -n $name_fd ]] && name=$(read_fd "$name_fd" 192)
 [[ -n $cwd_fd ]] && cwd=$(read_fd "$cwd_fd" 1024)
 
 # C0/C1 control bytes (plus the bidi/format code points) are stripped at
@@ -424,13 +609,26 @@ b64() { printf '%s' "$1" | base64 -w0; }
 
 emit_report() {
   [[ -n $emit_osc ]] || return 0
-  local seq="state=$state"
-  [[ -n $kind ]] && seq+=":kind=$kind"
-  [[ -n $progress ]] && seq+=":progress=$progress"
-  seq+=":app=$agent"
-  [[ -n $name ]] && seq+=":title=$(b64 "$name")"
-  [[ -n $message ]] && seq+=":msg=$(b64 "$message")"
-  [[ -n $record_id ]] && seq+=":id=$record_id"
+  local seq
+  if [[ $state == clear ]]; then
+    # A clear is a command, not a state: it removes the addressed record, so
+    # it carries the address and nothing else.
+    seq="state=clear:app=$agent"
+    [[ -n $record_id ]] && seq+=":id=$record_id"
+  else
+    seq="state=$state"
+    # kind and progress describe a run that is in flight. A settled report
+    # (done, error) has no run left, and a cleared one has no record at all,
+    # so a stale kind or progress would be a claim about nothing.
+    if [[ $state == working || $state == blocked ]]; then
+      [[ -n $kind ]] && seq+=":kind=$kind"
+      [[ -n $progress ]] && seq+=":progress=$progress"
+    fi
+    seq+=":app=$agent"
+    [[ -n $name ]] && seq+=":title=$(b64 "$name")"
+    [[ -n $message ]] && seq+=":msg=$(b64 "$message")"
+    [[ -n $record_id ]] && seq+=":id=$record_id"
+  fi
   if [[ $emit_osc == tty ]]; then
     { printf '\033]7501;%s\033\\' "$seq" >/dev/tty; } 2>/dev/null || true
   else
@@ -439,6 +637,9 @@ emit_report() {
 }
 
 if ((remove)) || [[ $state == clear ]]; then
+  # A removal is a clear: the consumer has to see the record go away, so the
+  # emitted sequence says `state=clear` and never the default working.
+  state=clear
   lock_dir
   emit_report
   # Through the descriptor lock_dir just opened, not through the path.
@@ -572,6 +773,7 @@ merged=$(jq -c \
   --rawfile kind <(printf '%s' "$kind") \
   --rawfile progress <(printf '%s' "$progress") \
   --rawfile recordid <(printf '%s' "$record_id") \
+  --rawfile terminalid <(printf '%s' "$terminal_id") \
   --rawfile name <(printf '%s' "$name") \
   --rawfile cwd <(printf '%s' "$cwd") \
   --rawfile project <(printf '%s' "$project") \
@@ -602,16 +804,22 @@ merged=$(jq -c \
       schemaVersion: 2,
       agent: $agent,
       sessionId: $session,
-      name: (if $name != "" then $name else ($old.name | text(80)) end),
+      name: (if $name != "" then $name else ($old.name | text(192)) end),
       cwd: (if $cwd != "" then $cwd else ($old.cwd | text(1024)) end),
       project: (if $project != "" then $project else ($old.project | text(256)) end),
       state: $state,
       kind: (if $state == "blocked" then $kind else "" end),
       progress: (if ($state == "working" or $state == "blocked") and $progress != ""
         then (($progress | tonumber?) // -1) else -1 end),
-      recordId: (if $recordid != "" then $recordid else ($old.recordId | text(128)) end),
+      recordId: (if $recordid != "" then $recordid else ($old.recordId | text(263)) end),
+      # The terminal id names the pty (or the tap) that owns this record. Like
+      # the multiplexer pane it is a stable property of the session: a report
+      # from a hook that does not know the terminal must not erase one that
+      # is already known, or the record would fall back to the old pid key and
+      # split into another session.
+      terminalId: (if $terminalid != "" then $terminalid else ($old.terminalId | text(64)) end),
       message: (if ($state == "blocked" or $state == "done" or $state == "error")
-        then (if $message != "" then $message else ($old.message | text(240)) end)
+        then (if $message != "" then $message else ($old.message | text(2048)) end)
         else "" end),
       lastPrompt: (if $prompt != "" then $prompt else ($old.lastPrompt | text(240)) end),
       pid: $pid,

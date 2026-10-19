@@ -236,6 +236,23 @@ Panel {
         }
       }
 
+      // The record's own identity (OSC 7501 `id`), which is also its title
+      // when the record carries no name of its own. One terminal can own
+      // several records in the same folder, so this line is what tells their
+      // cards apart; records with a name (or whose id duplicates the folder
+      // label) show nothing new here.
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        visible: card.session.name === "" && card.session.recordId !== ""
+          && card.session.recordId !== Model.folderLabel(card.session)
+        text: card.session.recordId
+        color: card.titleColor
+        font.family: root.contentFontFamily
+        font.pixelSize: Style.font.bodySmall
+        elide: Text.ElideRight
+      }
+
       Text {
         textFormat: Text.PlainText
         width: parent.width

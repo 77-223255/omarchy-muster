@@ -6,11 +6,19 @@
 > **Early OSC 7501 experiment — not usable, not released.**
 > This branch is a place to keep an idea: what Muster would look like if it
 > spoke the Program Status Protocol (OSC 7501) end to end. The protocol itself
-> has not landed — only libghostty-vt parses it, the Ghostty application ignores
-> it, and no agent ships it — so most of this cannot be exercised yet. Expect
-> large, breaking changes to the record contract, the writers and the UI, and
-> expect it to be incomplete. Do not install or rely on this branch; use
-> `main`. See [`docs/osc7501.md`](docs/osc7501.md) for the sketch.
+> has landed, and as of 2026-10-19 several agents ship it — Claude Code
+> 2.1.295+, pi 1.1.0+, Crush 0.98+, omp 18.8.7+ — with Codex merged and
+> released (0.163.0) and Docker Agent 1.150.0 and Factory Droid 0.236.0 behind
+> them; opencode and Gemini CLI are still pending. On the terminal side Kitty
+> has it on master, but the Ghostty 1.3.1 application does not (only
+> libghostty-vt on main parses it), and tmux and Herdr drop the sequence
+> instead of forwarding it. Muster is a bar consumer, and the protocol has no
+> read API — the records live in the terminal — so Muster still needs
+> `muster-tap` or a hook to see a session at all. Expect large, breaking
+> changes to the record contract, the writers and the UI, and expect it to be
+> incomplete. Do not install or rely on this branch; use `main`. See
+> [`docs/osc7501.md`](docs/osc7501.md) for the sketch and
+> [`docs/native-emitters.md`](docs/native-emitters.md) for the support matrix.
 
 Live coding-agent sessions in the Omarchy bar, with a completion sound and a
 desktop notification — no multiplexer required, and a click jumps to the right
@@ -64,8 +72,16 @@ window title or a process list, and there is no rule engine — nothing that can
 guess a state wrong or silently stop working. (The window id *is* looked up from
 the parent chain when a record is written, but only to make a click focus the
 right terminal; it never decides a session's state.) The bundled pi bridge
-reports the exact states, emits the sequence too, and keeps a `completedRuns`
-counter that makes "a run just finished" unmissable.
+reports the exact states and keeps a `completedRuns` counter that makes "a run
+just finished" unmissable; it writes the protocol sequence to the terminal only
+on request (`MUSTER_EMIT_OSC=1`), because pi 1.1.0 and later report it
+themselves and two writers for one session mean two records for one run.
+
+Agents that already speak the protocol — Claude Code 2.1.295+, pi 1.1.0+,
+Crush 0.98+, omp 18.8.7+, Codex 0.163.0+ and others — need no per-agent code
+at all: run them under `bin/muster-tap` and their reports become records.
+[`docs/native-emitters.md`](docs/native-emitters.md) has the matrix, with the
+upstream evidence.
 
 Adding an agent is therefore also exact: report the state. See *Adding another
 agent* below, and [`docs/osc7501.md`](docs/osc7501.md) for the mapping.
@@ -90,6 +106,14 @@ ln -sfn ~/.config/omarchy/plugins/shienze.muster/pi/muster.ts \
 Restart pi for the bridge to load. Changing a `.qml` file hot-reloads the
 widget, but `Model.js` (a cached QML library) and the IPC target only change
 on `omarchy restart shell`.
+
+The bridge writes the session record and nothing else. pi 1.1.0 and later
+report OSC 7501 themselves, so the bridge's own terminal emission is **off by
+default**; turn it on with `MUSTER_EMIT_OSC=1` when you run a pi older than
+1.1.0, or when you want the bridge to be the only writer on the wire. Do not
+run the same pi under `muster-tap` *and* leave the emission on: the tap would
+see the bridge's sequence and file a second record next to the one the bridge
+already writes. One source per session.
 
 ### Working from a checkout
 
@@ -195,10 +219,13 @@ The toast ships content-free — the agent and a fixed state word, not the promp
 — because omarchy's notification path takes the text as process arguments and
 persists it, so a prompt there would be readable from `/proc/<pid>/cmdline` and
 kept on disk ([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209),
-fix [#8259](https://github.com/basecamp/omarchy/pull/8259) pending). The version
-that does show the prompt is kept commented in `Service.qml`; to opt in, delete
-the safe `notificationCommand`, uncomment the block below it, and
-`omarchy restart shell`.
+fix [#8259](https://github.com/basecamp/omarchy/pull/8259) pending). The
+version that does show the prompt is the `notifyContent` setting, off by
+default: switch it on in `~/.config/omarchy/shell.json` (or in omarchy's own
+settings screen, which reads the manifest's schema) and the toast carries the
+session title and the last prompt instead. It is a setting rather than a
+source edit on purpose — an edit would be lost on the next update, and the
+privacy trade is one the user should make deliberately.
 
 ## Using it
 
@@ -217,12 +244,16 @@ omarchy-shell shienze.muster status | jq '.details[]'
 
 ## Settings
 
-Two toggles, in the panel and in `~/.config/omarchy/shell.json`:
+Three settings, in `~/.config/omarchy/shell.json`:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `soundEnabled` | `true` | Chime when a run finishes |
 | `notifyEnabled` | `true` | Desktop notification when a run finishes |
+| `notifyContent` | `false` | Put the session title and the last prompt in the notification body (it then travels through omarchy's notification argv and its log — see *Notification content*) |
+
+The first two are the toggles in the panel; the third is declared in the
+manifest, so omarchy's own settings screen offers it too.
 
 Everything else is deliberately internal — a widget whose alerts went quiet
 because of a stray setting is worse than one you tune by editing a line. They
@@ -232,6 +263,7 @@ live at the top of `Service.qml`:
 |----------|-------|---------|
 | `refreshIntervalSec` | `2` | Fallback rescan cadence; `inotifywait` makes new records appear at once |
 | `staleAfterSec` | `120` | Forget a record whose writer stopped (the bridge heartbeats every 30s) |
+| `settledAfterSec` | `21600` | Keep a finished (`done`/`error`) record for six hours — a writer that cleans up after itself (the pi bridge) never needs it |
 | `debounceMs` | `2000` | One alert per 2s: a completion inside the window is dropped |
 | `soundFile` | freedesktop `complete.oga` | |
 | `soundPlayer` | `paplay` | `pw-play` / `mpv` work too |
@@ -252,6 +284,7 @@ One JSON object per session in
 | `kind` | `permission` \| `question` \| `auth`, when `blocked` |
 | `progress` | integer `0`–`100`, or `-1` for absent |
 | `recordId` | the protocol's hierarchical `id` (`build/test`); display only |
+| `terminalId` | a stable id for the pty/tap instance that owns the record (`tap:<pid>`); a session is keyed by it plus `recordId` when it is present, so one tap can own several records |
 | `message` | the protocol's `msg`; shown when `blocked`, `done` or `error` |
 | `lastPrompt` | shown on the card |
 | `pid` | owning process; also how duplicate records are collapsed |
@@ -321,8 +354,19 @@ there is nothing else to write:
 
 `muster-tap` forwards the agent's output unchanged and turns every report it sees
 into a record, so an agent that already speaks the protocol needs no per-agent
-code. It answers the protocol's support query itself, and removes a live record
-when the agent exits (a `done`/`error` record is left behind).
+code — and there are several now (Claude Code 2.1.295+, pi 1.1.0+, Crush 0.98+,
+omp 18.8.7+, Codex 0.163.0+; see
+[`docs/native-emitters.md`](docs/native-emitters.md)). It answers the
+protocol's support query itself, so an agent that waits for the terminal to
+confirm support reports even under a terminal that never answers — Ghostty
+1.3.1, or tmux and Herdr, which drop the sequence entirely. It removes a live
+record when the agent exits (a `done`/`error` record is left behind).
+
+**One source per session.** If the agent speaks the protocol natively, the tap
+is that source: do not also run a hook or the pi bridge's OSC emission for the
+same session, or the same run turns into two records. The pi bridge writes
+only its record by default for exactly this reason; its own terminal emission
+is the opt-in `MUSTER_EMIT_OSC=1`.
 
 A hook can also hand the protocol body straight to the writer:
 
@@ -332,7 +376,7 @@ printf '%s' "$OSC_BODY" | $report --agent claude --session "$ID" \
 ```
 
 `--emit-osc tty` mirrors the report back to the terminal, so a terminal that
-shows OSC 7501 (Rex today) lights up as well.
+shows OSC 7501 (Rex today, Kitty on master) lights up as well.
 
 ### The record way
 
@@ -449,11 +493,12 @@ its own small plugin, not here.
 | `Panel.qml` | session panel and the two toggles |
 | `Record.qml` | one watched session record |
 | `Model.js` | record normalization, ordering, agent names and marks |
-| `pi/muster.ts` | pi → record + OSC 7501 bridge |
+| `pi/muster.ts` | pi → record + OSC 7501 bridge (the OSC part is opt-in: `MUSTER_EMIT_OSC=1`) |
 | `bin/muster-report` | record writer and OSC 7501 front end for other agents |
 | `bin/muster-tap` | optional pty receiver: OSC 7501 on the wire → records |
 | `bin/muster-doctor` | dependency check |
 | `docs/osc7501.md` | how Muster speaks the Program Status Protocol |
+| `docs/native-emitters.md` | who speaks OSC 7501 today, with versions and upstream evidence |
 | `assets/` | README screenshots |
 | `preview.png` | root listing card for the marketplace (optional) |
 | `docs/submission-body.md` | the exact issue body for a marketplace listing |

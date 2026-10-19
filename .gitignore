@@ -7,5 +7,3 @@
 __pycache__/
 *.pyc
 
-# dev-only scenario test; not shipped in the plugin
-/tests/

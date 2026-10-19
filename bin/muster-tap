@@ -15,6 +15,17 @@ it sees an OSC 7501 report in the stream it publishes the same report as a
 record. That makes any program which already speaks OSC 7501 — no hook, no
 per-agent code — a first-class session to the widget.
 
+It answers the spec's feature-detection query (`OSC 7501;?`) itself, so a
+program that asks before it reports starts reporting even under a terminal
+that does not answer. The query is still forwarded, so a terminal that does
+answer is not silenced either.
+
+One tap owns several records at once: every report is filed under its
+protocol id, and the empty id is the root record. `state=clear` removes the
+addressed record and every record below it, a root clear removes every record
+of this tap, and a new shell prompt (OSC 133 `A`) or the exit of the child
+drops the records that are still running — `done` and `error` survive both.
+
 It is deliberately a per-session wrapper, not a daemon: nothing runs in the
 background, and nothing listens on a socket. It writes records by calling
 bin/muster-report with the report on a descriptor, so the record path vetting,
@@ -26,6 +37,7 @@ itself; every agent with a hook still uses muster-report directly.
 """
 
 import fcntl
+import hashlib
 import os
 import pty
 import re
@@ -37,9 +49,38 @@ import sys
 import termios
 import tty
 
-OSC_PREFIX = b"\x1b]7501;"
+OSC_7501_PREFIX = b"\x1b]7501;"
+OSC_133_PREFIX = b"\x1b]133;"
 MAX_BODY = 4096  # the spec caps a whole sequence at 4096 bytes
-STATE_WORDS = {"idle", "working", "done", "blocked", "error", "clear"}
+
+# The feature probe, answered as a terminal would (spec rev 0.4): the states
+# this consumer understands and the kinds a blocked report may carry.
+PROBE_REPLY = (b"\x1b]7501;?:states=idle,working,done,blocked,error"
+               b":kinds=permission,question,auth\x1b\\")
+
+# The states a report may carry. `clear` is a command, never a stored state,
+# and a report without a state (or with a state the spec does not define) is
+# ignored — the spec never says "assume working".
+STATES = {"idle", "working", "done", "blocked", "error"}
+# `done` and `error` are settled: they survive the exit of the child and a
+# new shell prompt, so the user finds the result.
+SETTLED = {"done", "error"}
+# `working` and `blocked` are live: a new shell prompt means the run is over.
+LIVE = {"working", "blocked"}
+
+# The wire grammar of the spec: a key is 1..16 lowercase letters, a value is
+# made of the characters below. Whitespace around a key or a value is trimmed,
+# but whitespace inside a value is not part of the charset, so such a pair is
+# malformed and is skipped.
+KEY_RE = re.compile(r"^[a-z]{1,16}$")
+VALUE_RE = re.compile(r"^[A-Za-z0-9_.,+/=-]*$")
+# A record id is hierarchical: at most 8 levels of at most 32 characters,
+# which is 263 characters in all (8 x 32 + 7 separators).
+ID_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,32}(?:/[A-Za-z0-9_.+-]{1,32}){0,7}$")
+MAX_ID_LEN = 263
+# The shape muster-report holds an agent or a session id to; the tap never
+# hands it anything else.
+ID_SHAPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def fail(message):
@@ -56,72 +97,309 @@ def report_path():
 
 
 # A record id is an id, not text: muster-report holds --agent/--session to a
-# plain charset, so a protocol `app` or `id` that carries anything else is
-# reduced here before it is handed over as an option value.
-def safe_id(value, fallback):
+# plain charset, so a protocol `app` that carries anything else is reduced
+# here before it is handed over as an option value.
+def valid_app(value):
+    """The spec's app grammar: [A-Za-z0-9_.+-]{1,32}."""
+    return bool(re.match(r"^[A-Za-z0-9_.+-]{1,32}$", value or ""))
+
+
+def safe_agent(value, fallback="agent"):
     value = re.sub(r"[^A-Za-z0-9._-]", "_", str(value or ""))
-    value = value.lstrip(".-_")
+    value = re.sub(r"^[^A-Za-z0-9]+", "", value)
     return (value or fallback)[:64]
+
+
+# The file name of a record holds the session id, so a protocol id has to be
+# reduced to a plain token. A token that lost information (a `/` became a `_`)
+# or had to be cut short gets a short hash appended, so two different ids
+# never land on the same file.
+def session_token(value, budget):
+    token = re.sub(r"[^A-Za-z0-9._-]", "_", str(value or ""))
+    if token == value and len(token) <= budget:
+        return token
+    digest = hashlib.blake2b(str(value).encode("utf-8", "replace"),
+                             digest_size=4).hexdigest()
+    if len(token) + 9 <= budget:
+        return f"{token}-{digest}"
+    return f"{token[:max(1, budget - 9)]}-{digest}"
+
+
+def valid_id(value):
+    """The spec's id grammar: 263 characters in all, 32 per level, 8 levels."""
+    if not value or len(value) > MAX_ID_LEN:
+        return False
+    return bool(ID_RE.match(value))
 
 
 # --------------------------------------------------------------- the wire
 
 class Scanner:
-    """Extract complete OSC 7501 bodies from a byte stream.
+    """Watch a byte stream for the sequences Muster cares about.
 
     The bytes are forwarded to the terminal regardless; this only watches them.
     A sequence split across reads is held until its terminator arrives, and a
-    partial OSC prefix at the end of a read is kept for the next one.
+    partial prefix at the end of a read is kept for the next one. The two
+    sequences are an OSC 7501 report and the OSC 133 `A` prompt marker, which
+    is terminated by BEL or by ST like every other OSC sequence.
     """
 
     def __init__(self):
         self.buf = b""
 
     def feed(self, data):
+        events = []
         self.buf += data
-        bodies = []
-        prefix = len(OSC_PREFIX)
-        while self.buf:
-            start = self.buf.find(OSC_PREFIX)
-            if start < 0:
-                # Keep only a tail that could be the beginning of a prefix.
-                keep = prefix - 1
+        while True:
+            found = []
+            at = self.buf.find(OSC_7501_PREFIX)
+            if at >= 0:
+                found.append((at, "7501"))
+            at = self.buf.find(OSC_133_PREFIX)
+            if at >= 0:
+                found.append((at, "133"))
+            if not found:
+                # No sequence in sight: keep only a tail that could still grow
+                # into one.
+                keep = max(len(OSC_7501_PREFIX), len(OSC_133_PREFIX)) - 1
                 if len(self.buf) > keep:
                     self.buf = self.buf[-keep:]
                 break
+            start, kind = min(found)
+            prefix = OSC_7501_PREFIX if kind == "7501" else OSC_133_PREFIX
             # Bytes before the prefix were already forwarded; drop them here.
-            if start:
-                self.buf = self.buf[start:]
-            bel = self.buf.find(b"\x07", prefix)
-            st = self.buf.find(b"\x1b\\", prefix)
+            self.buf = self.buf[start:]
+            bel = self.buf.find(b"\x07", len(prefix))
+            st = self.buf.find(b"\x1b\\", len(prefix))
             ends = [e for e in (bel, st) if e != -1]
             if not ends:
                 # Incomplete. Give up only if it has grown past any legal
                 # sequence, so a hostile stream cannot pin memory.
-                if len(self.buf) > MAX_BODY + prefix:
+                if len(self.buf) > MAX_BODY + len(prefix):
                     self.buf = b""
                 break
             end = min(ends)
-            bodies.append(bytes(self.buf[prefix:end]))
+            body = bytes(self.buf[len(prefix):end])
             self.buf = self.buf[end + (2 if end == st else 1):]
-        return bodies
+            if kind == "7501":
+                events.append(("7501", body))
+            elif body[:1] == b"A":
+                # OSC 133 `A` is a new shell prompt: whatever was running is
+                # over.
+                events.append(("prompt", body))
+        return events
 
 
 def parse_pairs(body):
-    """The protocol's key=value list. Unknown keys are ignored, last wins."""
+    """The protocol's key=value list, parsed defensively.
+
+    A key that is not 1..16 lowercase letters is not a key at all, and a
+    value outside the wire charset makes its pair malformed; both are skipped.
+    A repeated key keeps the last value, and whitespace around a key or a
+    value is trimmed — but never inside a value, because a space is outside
+    the charset and the pair is malformed anyway.
+    """
     pairs = {}
-    try:
-        text = body.decode("utf-8", "replace")
-    except Exception:
-        return pairs
-    for pair in text.split(":"):
-        if "=" not in pair:
+    # surrogateescape keeps an undecodable byte in the value, where the
+    # charset check rejects the pair, instead of failing the whole body.
+    text = body.decode("utf-8", "surrogateescape")
+    for chunk in text.split(":"):
+        if "=" not in chunk:
             continue
-        key, _, value = pair.partition("=")
+        key, _, value = chunk.partition("=")
         key = key.strip()
-        if key:
-            pairs[key] = value.strip()
+        value = value.strip()
+        if not KEY_RE.match(key):
+            continue
+        if not VALUE_RE.match(value):
+            continue
+        pairs[key] = value
     return pairs
+
+
+# -------------------------------------------------------------- the tap
+
+class Tap:
+    """The receiver: the records of one tap, fed by the OSC 7501 wire.
+
+    Every report is filed under its protocol id; the empty id is the root
+    record. The registry is per tap, so a program that reports several ids
+    owns several records at once and each of them keeps its own lifetime.
+    """
+
+    def __init__(self, pid, report, agent="", session="", master_fd=None):
+        self.pid = pid
+        self.report = report
+        self.agent = agent
+        self.session = session
+        self.master_fd = master_fd
+        self.terminal_id = f"tap:{pid}"
+        self.records = {}  # id -> {"state", "agent", "session"}
+        self.apps = {}  # id -> the app last seen for that id
+        self.scanner = Scanner()
+
+    # ------------------------------------------------------------- wire
+
+    def feed(self, data):
+        """Watch the stream: publish the reports, drop the stale records."""
+        for kind, body in self.scanner.feed(data):
+            if kind == "prompt":
+                self.drop_live()
+            else:
+                self.handle_body(body)
+
+    def handle_body(self, body):
+        if body.strip() == b"?":
+            # Feature detection: the whole body is `?`. Answer as the terminal
+            # would, so a program that asks before it reports starts
+            # reporting. The query itself is still forwarded to the real
+            # terminal, which may answer it as well.
+            self.answer_probe()
+            return
+        if len(body) > MAX_BODY:
+            # The whole sequence is over the cap: the report is dropped whole.
+            return
+        pairs = parse_pairs(body)
+        state = pairs.get("state", "")
+        if state == "clear":
+            # `clear` is a command, not a state: it removes records and never
+            # writes one.
+            self.clear(pairs.get("id", ""))
+            return
+        if state not in STATES:
+            # No state at all, or a state the spec does not define.
+            return
+        record_id = pairs.get("id", "")
+        if record_id and not valid_id(record_id):
+            # An id that breaks the grammar breaks the whole report: filing it
+            # under the root would overwrite an unrelated record.
+            return
+        agent = self.resolve_agent(record_id, pairs.get("app", ""))
+        session = self.resolve_session(record_id)
+        previous = self.records.get(record_id)
+        if previous is not None and previous["agent"] != agent:
+            # The app of this id changed, so the record moves to another file
+            # (the name of a record is agent + session): the old one is taken
+            # off the disk, or it would stay behind forever.
+            self.remove(previous)
+        self.publish(body, agent, session)
+        self.records[record_id] = {"state": state, "agent": agent, "session": session}
+
+    def answer_probe(self):
+        if self.master_fd is None:
+            return
+        try:
+            os.write(self.master_fd, PROBE_REPLY)
+        except OSError:
+            pass
+
+    # --------------------------------------------------------- identities
+
+    def resolve_agent(self, record_id, app):
+        """The agent a record is filed under.
+
+        `--agent` is an explicit override: when the user names an agent on
+        the command line, that name wins over the `app` the program reports,
+        and it is the fallback when nothing else is known. Without it, the
+        app comes from the report, and a report that carries no app inherits
+        the app of the nearest ancestor that has one — its own remembered app
+        first, then the parent, then the root.
+        """
+        # An app outside the spec's grammar is absent, not a reason to drop
+        # the report; the record then falls back to an inherited app or the
+        # agent the tap was started with.
+        if app and not valid_app(app):
+            app = ""
+        if app:
+            self.apps[record_id] = app
+        if self.agent:
+            return safe_agent(self.agent)
+        if app:
+            return safe_agent(app)
+        for candidate in self.ancestry(record_id):
+            known = self.apps.get(candidate)
+            if known:
+                return safe_agent(known)
+        return "agent"
+
+    def resolve_session(self, record_id):
+        """The file name of a record.
+
+        The root record is named after the tap (`tap-<pid>`) and a child
+        record after the tap and its id (`tap-<pid>-<safe id>`), so the
+        records of one tap never collide. An explicit `--session` overrides
+        both: it names one file for the whole tap, which collapses every id
+        of this tap into a single record.
+        """
+        if self.session:
+            return self.session
+        prefix = f"tap-{self.pid}"
+        if not record_id:
+            return prefix
+        return f"{prefix}-{session_token(record_id, 64 - len(prefix) - 1)}"
+
+    @staticmethod
+    def ancestry(record_id):
+        """The record itself, then its ancestors, nearest first, then the root."""
+        if not record_id:
+            return [""]
+        parts = record_id.split("/")
+        chain = ["/".join(parts[:i]) for i in range(len(parts), 0, -1)]
+        chain.append("")
+        return chain
+
+    # ----------------------------------------------------------- records
+
+    def publish(self, body, agent, session):
+        self.run([self.report, "--agent", agent, "--session", session,
+                  "--terminal-id", self.terminal_id, "--osc-fd", "0"], body)
+
+    def remove(self, record):
+        """Take a record off the disk, with the agent and session it had."""
+        self.run([self.report, "--agent", record["agent"],
+                  "--session", record["session"],
+                  "--terminal-id", self.terminal_id, "--remove"], b"")
+
+    def clear(self, record_id):
+        """`state=clear`: remove the addressed record and everything below it.
+
+        A clear without an id addresses the root and therefore removes every
+        record of this tap. The records are removed with the agent and the
+        session they were filed under, and their app entries go with them, so
+        a later report does not inherit an app of a record that is gone.
+        """
+        if record_id:
+            doomed = [key for key in set(self.records) | set(self.apps)
+                      if key == record_id or key.startswith(record_id + "/")]
+        else:
+            doomed = list(set(self.records) | set(self.apps))
+        for key in doomed:
+            record = self.records.pop(key, None)
+            if record is not None:
+                self.remove(record)
+            self.apps.pop(key, None)
+
+    def drop_live(self):
+        """A new shell prompt: the runs that were going are over."""
+        for key in [k for k, r in self.records.items() if r["state"] in LIVE]:
+            self.remove(self.records.pop(key))
+
+    def close(self):
+        """The child is gone: everything that is not settled is gone with it.
+
+        A `done` or an `error` survives — the user still has to see it — but
+        a record that was still running, idle or in an unknown state belongs
+        to a process that no longer exists.
+        """
+        for key in [k for k, r in self.records.items() if r["state"] not in SETTLED]:
+            self.remove(self.records.pop(key))
+
+    def run(self, argv, body=b""):
+        try:
+            subprocess.run(argv, input=body, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=False)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------- terminal
@@ -178,6 +456,11 @@ def main(argv):
     if not command:
         fail("no command given; usage: muster-tap [options] -- <command> [args...]")
 
+    if agent and not ID_SHAPE_RE.match(agent):
+        fail("--agent must be an id: letters, digits, dot, dash, underscore (max 64)")
+    if session and not ID_SHAPE_RE.match(session):
+        fail("--session must be an id: letters, digits, dot, dash, underscore (max 64)")
+
     report = report_path()
     if not os.access(report, os.X_OK):
         fail(f"{report} is not executable; run muster-doctor")
@@ -226,40 +509,7 @@ def main(argv):
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGHUP, on_term)
 
-    scanner = Scanner()
-    last_state = None
-    last_agent = ""
-    last_session = ""
-
-    def publish(body):
-        nonlocal last_state, last_agent, last_session
-        if body.strip() == b"?":
-            # Feature detection: the whole body is `?`. Answer as the terminal,
-            # so a program that asks before reporting starts reporting. A
-            # terminal that also answers only makes a harmless duplicate.
-            try:
-                os.write(master, b"\x1b]7501;?\x1b\\")
-            except OSError:
-                pass
-            return
-        pairs = parse_pairs(body)
-        state = pairs.get("state", "")
-        if state == "clear":
-            last_state = "clear"
-            return
-        if state not in STATE_WORDS:
-            return
-        who = safe_id(agent or pairs.get("app", ""), "agent")
-        sid = safe_id(session or pairs.get("id", ""), f"tap-{pid}")
-        last_state, last_agent, last_session = state, who, sid
-        try:
-            subprocess.run(
-                [report, "--agent", who, "--session", sid, "--osc-fd", "0"],
-                input=body, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                check=False,
-            )
-        except OSError:
-            pass
+    tap = Tap(pid, report, agent=agent, session=session, master_fd=master)
 
     try:
         watch_stdin = True
@@ -273,9 +523,10 @@ def main(argv):
                     data = b""
                 if not data:
                     break
+                # Every byte goes to the terminal unchanged; the report is
+                # only watched, never rewritten and never sent back.
                 os.write(stdout_fd, data)
-                for body in scanner.feed(data):
-                    publish(body)
+                tap.feed(data)
             if watch_stdin and stdin_fd in readable:
                 try:
                     data = os.read(stdin_fd, 65536)
@@ -297,13 +548,10 @@ def main(argv):
     _, status = os.waitpid(pid, 0)
     code = os.waitstatus_to_exitcode(status)
 
-    # Process exit is one of the events the spec drops working/blocked on; a
+    # Process exit is one of the events the spec drops working/blocked on;
+    # every record that is still running goes with the process, while a
     # settled done/error record is left behind for the user to find.
-    if last_state is not None and last_state not in ("done", "error", "clear"):
-        subprocess.run(
-            [report, "--agent", last_agent, "--session", last_session, "--remove"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )
+    tap.close()
     return code if code >= 0 else 128 - code
 
 
