@@ -140,7 +140,7 @@ INPUT_TIMEOUT = 0.1
 FLUSH_BATCH = 4
 FLUSH_INTERVAL = 0.15
 WRITER_INFLIGHT = 4
-# A global token bucket, not just a per-batch limit: a child that keeps the
+# A per-tap token bucket, not just a per-batch limit: a child that keeps the
 # queue full could otherwise drive ~27 writer processes per second, each a
 # shell pipeline, and starve every other integration on the shared lock.
 WRITER_RATE = 6.0
@@ -1128,7 +1128,8 @@ def detect_window():
         result = subprocess.run(["hyprctl", "-j", "activewindow"],
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 timeout=2, check=False, env=safe_env())
-        address = json.loads(result.stdout or b"{}").get("address", "")
+        payload = json.loads(result.stdout or b"{}")
+        address = payload.get("address", "") if isinstance(payload, dict) else ""
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return ""
     return address if re.fullmatch(r"0x[0-9a-fA-F]{1,16}", str(address)) else ""
