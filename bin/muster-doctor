@@ -1,11 +1,22 @@
 #!/bin/bash
 #
-# Dependency check for the shienze.muster plugin.
+# Dependency and state check for the shienze.muster plugin.
 #
-# The plugin has no build step and no package manager: it runs inside the
-# omarchy shell (Quickshell) and shells out to a handful of desktop tools.
-# This script reports every one of them, so a broken install is a one-command
-# diagnosis instead of a silent widget.
+# This branch is protocol-only. bin/muster-tap is the only writer: it runs an
+# agent on a pty, speaks OSC 7501 with it, and writes the JSON record itself
+# with the Python 3 standard library. There is no report writer, no agent
+# bridge and no hook, so the checks below are the ones this branch needs:
+#
+#   * python3 and bin/muster-tap — the writer, and the only way a session
+#     exists at all;
+#   * the handful of tools the omarchy shell service shells out to;
+#   * hyprctl (plus tmux/herdr inside a multiplexer) to focus a session;
+#   * paplay and omarchy-notification-send for the completion alert;
+#   * the state directory: a real, owner-only directory, and owner-only
+#     records in it.
+#
+# Nothing here needs jq, flock, base64, sed, iconv or sha1sum: the writer is
+# Python and the shell side never parses JSON.
 #
 #   muster-doctor [--json]
 
@@ -15,35 +26,38 @@ json=0
 [[ ${1:-} == "--json" ]] && json=1
 
 plugin_dir=${MUSTER_PLUGIN_DIR:-$HOME/.config/omarchy/plugins/shienze.muster}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || script_dir="."
 state_base=${XDG_STATE_HOME:-$HOME/.local/state}
-# The writers refuse a relative XDG_STATE_HOME. A doctor that audited one would
+# The writer refuses a relative XDG_STATE_HOME. A doctor that audited one would
 # report on a directory the plugin never uses, a false all-green.
 [[ $state_base == /* ]] || { echo "muster-doctor: XDG_STATE_HOME must be an absolute path (got: $state_base)" >&2; exit 2; }
 state_dir="$state_base/omarchy/muster/sessions"
 marks_dir="$state_base/omarchy/muster/marks"
-pi_extension=$HOME/.pi/agent/extensions/muster.ts
 
 ok=0
 missing=0
 optional=0
 rows=()
 
-# Anything printed may derive from a record another integration wrote, so it is
-# stripped of control bytes first: a terminal executes ANSI/OSC sequences, and a
-# record's project name can carry them.
-# Anything printed may derive from a record another integration wrote, so it is
-# stripped of control and format code points first: a terminal executes
-# ANSI/OSC sequences, and a record's project name can carry them. tr removes C0
-# and DEL; sed removes the UTF-8-encoded C1 and bidi ranges as whole sequences,
-# because a byte range over 0x7f-0x9f would eat the continuation bytes of
-# ordinary multi-byte text and corrupt it.
+# Anything printed may derive from a record another integration wrote, so it
+# is stripped of control bytes first: a terminal executes ANSI/OSC sequences,
+# and a record's name or project can carry them.
+#
+# The C1 range and the bidi/format code points are removed as whole
+# characters, never as a byte range: a byte range over 0x80-0x9f would eat the
+# continuation bytes of ordinary multi-byte text and corrupt it.
 clean() {
-  printf '%s' "$1" | tr -d '\000-\037\177' | LC_ALL=C sed \
-    -e 's/\xc2[\x80-\x9f]//g' \
-    -e 's/\xe2\x80[\x8b-\x8f\xaa-\xae]//g' \
-    -e 's/\xe2\x81[\xa6-\xa9]//g' \
-    -e 's/\xd8\x9c//g' \
-    -e 's/\xef\xbb\xbf//g'
+  local s=$1 ch i
+  s=${s//[$'\x01'-$'\x1f'$'\x7f']/}
+  for ((i = 0x80; i <= 0x9f; i++)); do
+    printf -v ch '%b' "\\u$(printf '%04x' "$i")"
+    s=${s//$ch/}
+  done
+  for i in 200b 200c 200d 200e 200f 202a 202b 202c 202d 202e 2066 2067 2068 2069 feff; do
+    printf -v ch '%b' "\\u$i"
+    s=${s//$ch/}
+  done
+  printf '%s' "$s"
 }
 
 record() {
@@ -80,10 +94,17 @@ fi
 
 if omarchy-shell shell ping >/dev/null 2>&1; then
   record ok "shell running" "IPC reachable"
-  if omarchy plugin list --json 2>/dev/null | jq -e 'any(.[]; .id == "shienze.muster" and .enabled == true)' >/dev/null; then
-    record ok "plugin enabled" "shienze.muster is in the bar layout"
+  # The plugin list is read as text: this doctor must not need jq.
+  plugin_line=$(omarchy plugin list 2>/dev/null | grep -E "^shienze\.muster[[:space:]]" | head -n 1)
+  if [[ -z $plugin_line ]]; then
+    record missing "plugin enabled" "shienze.muster is not in the plugin list; omarchy-shell shell rescanPlugins"
   else
-    record missing "plugin enabled" "run: omarchy plugin enable shienze.muster left"
+    read -r _plugin_id plugin_state _rest <<<"$plugin_line"
+    if [[ $plugin_state == "enabled" ]]; then
+      record ok "plugin enabled" "shienze.muster is in the bar layout"
+    else
+      record missing "plugin enabled" "shienze.muster is $plugin_state; run: omarchy plugin enable shienze.muster left"
+    fi
   fi
   if omarchy-shell shienze.muster status >/dev/null 2>&1; then
     record ok "plugin IPC" "$(omarchy-shell shienze.muster status 2>/dev/null)"
@@ -103,14 +124,100 @@ else
   record missing "plugin source" "$plugin_dir is missing Service/BarWidget/Panel/Record/Model files"
 fi
 
-have hyprctl "focusing an agent's terminal on click"
-have find "enumerating session records"
-have mkdir "creating the sessions directory"
-have dd "reading a record without following a symlink or blocking on a special file"
+# --------------------------------------------------------------- writer
+
+# The tap is the only writer in this branch: without it no agent reports and
+# the bar stays empty. A checkout that is not installed still has the script
+# next to this one, so that case is checked too.
+tap="$plugin_dir/bin/muster-tap"
+if [[ ! -x $tap && -x $script_dir/muster-tap ]]; then
+  tap="$script_dir/muster-tap"
+fi
+if [[ -x $tap ]]; then
+  record ok "muster-tap" "$tap"
+elif [[ -f $tap ]]; then
+  record missing "muster-tap" "$tap is not executable; run: chmod +x $tap"
+else
+  record missing "muster-tap" "not found; the only writer of this branch is missing"
+fi
+
+# A pi extension that an older branch linked is left over: nothing reads it
+# any more, and it would only confuse the user. It is not an error.
+pi_extension=$HOME/.pi/agent/extensions/muster.ts
+if [[ -e $pi_extension || -L $pi_extension ]]; then
+  record optional "pi extension link" "$pi_extension is left over from an older branch; remove: rm -f $pi_extension"
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  record ok python3 "$(command -v python3) · runs bin/muster-tap"
+  # The tap needs these standard-library modules; a python without them (or
+  # too old for the syntax) cannot write a record.
+  if python3 -c 'import json, os, pty, termios, select, fcntl, struct, base64, hashlib, secrets, stat' >/dev/null 2>&1; then
+    record ok "python stdlib" "pty, termios and the rest of the tap's imports are there"
+  else
+    record missing "python stdlib" "this python3 cannot import the modules bin/muster-tap needs"
+  fi
+else
+  record missing python3 "bin/muster-tap is a python3 script; install python3"
+fi
+
+# ---------------------------------------------------------- shell side
+
+# The omarchy service is a shell script inside QML: it creates the state
+# directory, lists the records, reads one with dd and prunes the old ones.
+for tool in bash find sort head stat dd mkdir chmod timeout od tr; do
+  have "$tool" "the shell service reads, lists and prunes the records"
+done
+
+# inotifywait only makes a new record show up at once instead of on the next
+# scan, so it is a nicety, not a requirement.
 have inotifywait "showing a new session at once instead of on the next scan" optional
 
+# --------------------------------------------------------------- focus
+
+have hyprctl "focusing a session's terminal on click"
+
+# herdr runs agent panes under a daemon, so a click needs its CLI to switch
+# back to the pane; only sessions inside herdr use it.
+if [[ ${HERDR_ENV:-} == "1" ]] || [[ -S ${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock} ]]; then
+  have herdr "switching to a session's herdr pane on click" required
+else
+  have herdr "switching to a session's herdr pane on click" optional
+fi
+
+# tmux keeps its panes under a server, so a click needs its CLI to switch the
+# attached client back to the pane; only sessions inside tmux use it. There is no
+# reliable way to detect that from outside a pane, so it is required only when
+# this very run is inside tmux.
+if [[ -n ${TMUX:-} ]]; then
+  have tmux "switching to a session's tmux pane on click" required
+else
+  have tmux "switching to a session's tmux pane on click" optional
+fi
+
+# --------------------------------------------------------------- alerts
+
+# paplay is what the shipped widget calls (soundPlayer in Service.qml); the
+# others only help if the user edits that line, so they are not a pass.
+if command -v paplay >/dev/null 2>&1; then
+  record ok "audio player" "$(command -v paplay)"
+else
+  record missing "audio player" "the completion sound calls paplay; install pipewire-pulse"
+fi
+
+sound_file=/usr/share/sounds/freedesktop/stereo/complete.oga
+if [[ -r $sound_file ]]; then
+  record ok "sound file" "$sound_file"
+else
+  record optional "sound file" "$sound_file not readable; change soundFile in the widget settings"
+fi
+
+have omarchy-notification-send "the desktop popup on completion"
+
+# ---------------------------------------------------------------- state
+
 # mkdir and every later open follow a symlinked component, so a link at any
-# level moves the whole directory out of the state home. The writers refuse
+# level moves the whole directory out of the state home. The writer refuses
 # such a path, which means no record is written at all. Check every component
 # even when the sessions directory itself does not exist yet: a symlinked
 # omarchy/muster whose target has no sessions/ is still a broken writer.
@@ -132,9 +239,9 @@ for c in omarchy omarchy/muster omarchy/muster/sessions; do
   fi
 done
 if [[ -n $linked ]]; then
-  record missing "state path" "$linked; the writers refuse it"
+  record missing "state path" "$linked; the writer refuses it"
 elif [[ -n $broken ]]; then
-  record missing "state path" "$broken; the writers refuse it"
+  record missing "state path" "$broken; the writer refuses it"
 else
   record ok "state path" "no symlinked component under $state_base/omarchy"
 fi
@@ -142,21 +249,33 @@ fi
 if [[ -L $state_dir ]]; then
   record missing "sessions dir type" "$state_dir is a symlink; the writer refuses it"
 elif [[ -d $state_dir ]]; then
-  record ok "sessions dir" "$state_dir ($(find -- "$state_dir" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l) record(s))"
-  # A record carries the last user prompt and the working directory, so a
-  # group/other-readable directory or record is a leak, not a style nit.
+  record_count=$(find -- "$state_dir" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l)
+  record ok "sessions dir" "$state_dir ($record_count record(s))"
+
+  # The writer refuses a directory that is not exactly 0700, so a
+  # group/other-readable one is a leak and a broken writer, not a style nit.
   dir_mode=$(stat -c '%a' -- "$state_dir" 2>/dev/null || echo unknown)
-  if [[ -n $(find -- "$state_dir" -maxdepth 0 -perm /077 -print -quit 2>/dev/null) ]]; then
-    record missing "sessions dir mode" "$dir_mode — records hold prompts; run: chmod 700 $state_dir"
+  if [[ $dir_mode != "700" ]]; then
+    record missing "sessions dir mode" "$dir_mode — the writer refuses it; run: chmod 700 $state_dir"
   else
-    record ok "sessions dir mode" "$dir_mode (owner-only)"
+    record ok "sessions dir mode" "700 (owner-only)"
   fi
-  open_records=$(find -- "$state_dir" -maxdepth 1 -type f -name '*.json' -perm /077 2>/dev/null | wc -l)
+
+  if [[ -O $state_dir ]]; then
+    record ok "sessions dir owner" "owned by this user"
+  else
+    record missing "sessions dir owner" "not owned by this user; the writer refuses it"
+  fi
+
+  # A record is published with mode 0600 and the writer refuses anything else,
+  # so a readable record is both a leak and a record the writer cannot replace.
+  open_records=$(find -- "$state_dir" -maxdepth 1 -type f -name '*.json' ! -perm 600 -print 2>/dev/null | wc -l)
   if ((open_records > 0)); then
-    record missing "record mode" "$open_records record(s) group/other-readable; run: chmod 600 $state_dir/*.json"
+    record missing "record mode" "$open_records record(s) are not 0600; run: chmod 600 $state_dir/*.json"
   else
-    record ok "record mode" "records owner-only"
+    record ok "record mode" "records are 0600 (owner-only)"
   fi
+
   # The reader refuses a symlink, a special file and an oversized record, so a
   # bad one is a silent missing session; surface it instead.
   bad_type=$(find -- "$state_dir" -maxdepth 1 -name '*.json' ! -type f 2>/dev/null | wc -l)
@@ -178,7 +297,7 @@ elif [[ -d $state_dir ]]; then
     record ok "record size" "records are within 64 KiB"
   fi
 else
-  record optional "sessions dir" "$state_dir (created on first write)"
+  record optional "sessions dir" "$state_dir (created by the first tap)"
 fi
 
 # The marks are generated SVGs with no session data, so they stay readable —
@@ -196,84 +315,30 @@ else
   record optional "marks dir" "$marks_dir (created on first write)"
 fi
 
-# -------------------------------------------------------------- writers
-
-if [[ -L $pi_extension || -f $pi_extension ]]; then
-  if [[ -f $pi_extension ]]; then
-    record ok "pi bridge" "$(readlink -f -- "$pi_extension")"
-  else
-    record missing "pi bridge" "$pi_extension is a dangling symlink"
-  fi
-else
-  record optional "pi bridge" "link pi/muster.ts into $HOME/.pi/agent/extensions/ (only needed for pi)"
-fi
-
-for tool in bash jq flock stat dd mv chmod tr cut date wc awk cat rm head od; do
-  have "$tool" "muster-report writes records and OSC 7501 reports with it"
-done
-# The protocol's free-text fields arrive base64 encoded and every text field
-# is stripped of its control bytes before it is written, so these two are not
-# optional for a writer that speaks OSC 7501.
-have base64 "decoding the OSC 7501 title and msg"
-have sed "stripping the control bytes out of the text fields"
-have sha1sum "hashing a protocol id into a collision-resistant record name"
-have iconv "rejecting invalid UTF-8 in a protocol title/msg"
-have readlink "reporting the pi bridge target"
-if command -v base64 >/dev/null && ! timeout 2 base64 -w0 </dev/null >/dev/null 2>&1; then
-  record missing "base64 -w0" "this base64 cannot emit an unbroken OSC 7501 title/msg; install GNU coreutils"
-fi
-# The optional pty receiver: an agent that already emits OSC 7501 needs no hook,
-# only bin/muster-tap, which is Python. Nothing else in the plugin does.
-have python3 "running an OSC 7501 agent with no hook (bin/muster-tap)" optional
-have sort "the shell bounds its scans with it"
-have timeout "bounding hyprctl and the shell scans"
-
-# --------------------------------------------------------------- alerts
-
-# paplay is what the shipped widget calls (soundPlayer in Service.qml); the
-# others only help if the user edits that line, so they are not a pass.
-if command -v paplay >/dev/null 2>&1; then
-  record ok "audio player" "$(command -v paplay)"
-else
-  record missing "audio player" "the completion sound calls paplay; install pipewire-pulse"
-fi
-
-sound_file=/usr/share/sounds/freedesktop/stereo/complete.oga
-if [[ -r $sound_file ]]; then
-  record ok "sound file" "$sound_file"
-else
-  record optional "sound file" "$sound_file not readable; change soundFile in the widget settings"
-fi
-
-have omarchy-notification-send "the desktop popup on completion"
-
-# herdr runs agent panes under a daemon, so a click needs its CLI to switch
-# back to the pane; only sessions inside herdr use it.
-if [[ ${HERDR_ENV:-} == "1" ]] || [[ -S ${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock} ]]; then
-  have herdr "switching to a session's herdr pane on click" required
-else
-  have herdr "switching to a session's herdr pane on click" optional
-fi
-
-# tmux keeps its panes under a server, so a click needs its CLI to switch the
-# attached client back to the pane; only sessions inside tmux use it. There is no
-# reliable way to detect that from outside a pane, so it is required only when
-# this very run is inside tmux.
-if [[ -n ${TMUX:-} ]]; then
-  have tmux "switching to a session's tmux pane on click" required
-else
-  have tmux "switching to a session's tmux pane on click" optional
-fi
-
 # ---------------------------------------------------------------- output
 
+json_escape() {
+  # The detail is untrusted text and may hold a quote or a backslash.
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s' "$s"
+}
+
 if ((json)); then
-  printf '%s\n' "${rows[@]}" | jq -Rn '
-    [inputs | split("\u001f") | {status: .[0], name: .[1], detail: .[2]}]
-    | {ok: (map(select(.status == "ok")) | length),
-       optional: (map(select(.status == "optional")) | length),
-       missing: (map(select(.status == "missing")) | length),
-       checks: .}'
+  printf '{\n  "ok": %d,\n  "optional": %d,\n  "missing": %d,\n  "checks": [\n' \
+    "$ok" "$optional" "$missing"
+  total=${#rows[@]}
+  index=0
+  for row in "${rows[@]}"; do
+    IFS=$'\x1f' read -r status name detail <<<"$row"
+    index=$((index + 1))
+    comma=","
+    ((index == total)) && comma=""
+    printf '    {"status": "%s", "name": "%s", "detail": "%s"}%s\n' \
+      "$(json_escape "$status")" "$(json_escape "$name")" "$(json_escape "$detail")" "$comma"
+  done
+  printf '  ]\n}\n'
 else
   for row in "${rows[@]}"; do
     IFS=$'\x1f' read -r status name detail <<<"$row"

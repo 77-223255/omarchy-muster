@@ -3,22 +3,19 @@
 **English** · [中文](README.zh.md)
 
 > [!WARNING]
-> **Early OSC 7501 experiment — not usable, not released.**
-> This branch is a place to keep an idea: what Muster would look like if it
-> spoke the Program Status Protocol (OSC 7501) end to end. The protocol itself
-> has landed, and as of 2026-10-19 several agents ship it — Claude Code
-> 2.1.295+, pi 1.1.0+, Crush 0.98+, omp 18.8.7+ — with Codex merged and
-> released (0.163.0) and Docker Agent 1.150.0 and Factory Droid 0.236.0 behind
-> them; opencode and Gemini CLI are still pending. On the terminal side Kitty
-> has it on master, but the Ghostty 1.3.1 application does not (only
-> libghostty-vt on main parses it), and tmux and Herdr drop the sequence
-> instead of forwarding it. Muster is a bar consumer, and the protocol has no
-> read API — the records live in the terminal — so Muster still needs
-> `muster-tap` or a hook to see a session at all. Expect large, breaking
-> changes to the record contract, the writers and the UI, and expect it to be
-> incomplete. Do not install or rely on this branch; use `main`. See
-> [`docs/osc7501.md`](docs/osc7501.md) for the sketch and
-> [`docs/native-emitters.md`](docs/native-emitters.md) for the support matrix.
+> **Protocol-only experiment — not usable as a daily plugin, not released.**
+> This branch is one lane and one lane only: an agent that speaks the
+> [Program Status Protocol][osc7501] (OSC 7501) itself, run under
+> `bin/muster-tap`, which turns its reports into the JSON records the bar
+> reads. There is **no report writer, no agent bridge and no hook** here: an
+> agent that does not speak the protocol is not a session, and a card shows
+> **no prompt**; a session name only appears when the program sends `title`
+> (pi's native messages are `msg`, so often there is none).
+> The record contract, the writer and the UI are all still in motion, so
+> expect breaking changes. Do not install or depend on this branch; `main`
+> remains the full plugin. See [`docs/osc7501.md`](docs/osc7501.md) for the
+> protocol and [`docs/native-emitters.md`](docs/native-emitters.md) for the
+> support matrix.
 
 Live coding-agent sessions in the Omarchy bar, with a completion sound and a
 desktop notification — no multiplexer required, and a click jumps to the right
@@ -35,13 +32,13 @@ pane when you do use one (tmux or herdr).
   so a busy bar never pushes the clock around. Always visible; a bell when
   nothing is running, because a chip that disappears is a chip you cannot click.
 - **Panel** (click the chip) — one card per session: the agent's mark and the
-  folder it is working in, then whatever the state has to say (the last prompt,
-  or the message when it is blocked). No agent name on the card — the mark says
-  who, the folder says where. The card interior is always the same grey; the
-  state lives on the rim and in the title: a working card gets a soft
-  theme-coloured rim that breathes, a blocked card the urgent colour, idle
-  nothing. No elapsed timers: the panel answers "is anything running and does it
-  need me".
+  folder it is working in, then whatever the state has to say (the protocol's
+  `msg` when it is blocked, or when a run has ended). No agent name on the card
+  — the mark says who, the folder says where — and no prompt: the protocol does
+  not carry one. The card interior is always the same grey; the state lives on
+  the rim and in the title: a working card gets a soft theme-coloured rim that
+  breathes, a blocked card the urgent colour, idle nothing. No elapsed timers:
+  the panel answers "is anything running and does it need me".
 - **Alerts** — when a run finishes, a sound and an Omarchy notification.
   Clicking the notification focuses that session's terminal — and, for a session
   inside tmux or herdr, switches the multiplexer to the pane it runs in. In the
@@ -65,26 +62,25 @@ one optional root `preview.png`.
 **Reports, never guesses.** Muster speaks the [Program Status Protocol][osc7501]
 (OSC 7501), the terminal-native way for a program to report what it is doing —
 `idle`, `working`, `done`, `blocked`, `error`, with a `kind`, a `progress` and a
-one-line `msg`. An agent either writes one small JSON record per session, which
-the plugin watches, or emits the protocol sequence on its pty, which
-`bin/muster-tap` turns into the same record. The state is never inferred from a
-window title or a process list, and there is no rule engine — nothing that can
-guess a state wrong or silently stop working. (The window id *is* looked up from
-the parent chain when a record is written, but only to make a click focus the
-right terminal; it never decides a session's state.) The bundled pi bridge
-reports the exact states and keeps a `completedRuns` counter that makes "a run
-just finished" unmissable; it writes the protocol sequence to the terminal only
-on request (`MUSTER_EMIT_OSC=1`), because pi 1.1.0 and later report it
-themselves and two writers for one session mean two records for one run.
+one-line `msg`. The agent writes that protocol sequence to its terminal itself;
+`bin/muster-tap` sits in the pty path, answers the feature probe, and turns
+every report into one small JSON record, which the plugin watches. The state is
+never inferred from a window title or a process list, and there is no rule
+engine — nothing that can guess a state wrong or silently stop working. (The
+window id *is* looked up from the parent chain when a session starts, but only
+to make a click focus the right terminal; it never decides a session's state.)
+
+There is exactly **one writer** in this branch: the tap. It writes the record
+itself, in Python, with the standard library only — no shell pipeline, no
+`jq`, no lock file, no writer process. A record is staged and renamed
+onto its final name, so the reader never sees half a record, and the sessions
+directory is opened once and every write goes through that descriptor.
 
 Agents that already speak the protocol — Claude Code 2.1.295+, pi 1.1.0+,
 Crush 0.98+, omp 18.8.7+, Codex 0.163.0+ and others — need no per-agent code
 at all: run them under `bin/muster-tap` and their reports become records.
 [`docs/native-emitters.md`](docs/native-emitters.md) has the matrix, with the
 upstream evidence.
-
-Adding an agent is therefore also exact: report the state. See *Adding another
-agent* below, and [`docs/osc7501.md`](docs/osc7501.md) for the mapping.
 
 [osc7501]: https://www.superlogical.com/rex/docs/build/program-status
 
@@ -95,25 +91,12 @@ agent* below, and [`docs/osc7501.md`](docs/osc7501.md) for the mapping.
 omarchy plugin add https://github.com/77-223255/omarchy-muster.git --enable
 omarchy plugin enable shienze.muster left     # placement, if you skipped --enable
 
-# 2. the pi bridge
-ln -sfn ~/.config/omarchy/plugins/shienze.muster/pi/muster.ts \
-        ~/.pi/agent/extensions/muster.ts
-
-# 3. verify every dependency it shells out to
+# 2. verify every dependency it shells out to
 ~/.config/omarchy/plugins/shienze.muster/bin/muster-doctor
 ```
 
-Restart pi for the bridge to load. Changing a `.qml` file hot-reloads the
-widget, but `Model.js` (a cached QML library) and the IPC target only change
-on `omarchy restart shell`.
-
-The bridge writes the session record and nothing else. pi 1.1.0 and later
-report OSC 7501 themselves, so the bridge's own terminal emission is **off by
-default**; turn it on with `MUSTER_EMIT_OSC=1` when you run a pi older than
-1.1.0, or when you want the bridge to be the only writer on the wire. Do not
-run the same pi under `muster-tap` *and* leave the emission on: the tap would
-see the bridge's sequence and file a second record next to the one the bridge
-already writes. One source per session.
+Changing a `.qml` file hot-reloads the widget, but `Model.js` (a cached QML
+library) and the IPC target only change on `omarchy restart shell`.
 
 ### Working from a checkout
 
@@ -136,14 +119,11 @@ omarchy plugin enable shienze.muster left
 ## Removal
 
 ```bash
-# 1. the pi bridge
-rm -f ~/.pi/agent/extensions/muster.ts
-
-# 2. the shell plugin (removes the bar entry and the plugin directory)
+# 1. the shell plugin (removes the bar entry and the plugin directory)
 omarchy plugin disable shienze.muster
 omarchy plugin remove shienze.muster
 
-# 3. the session records it read
+# 2. the session records it read
 rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster"
 ```
 
@@ -165,69 +145,44 @@ creates `omarchy/muster/sessions` and `omarchy/muster/marks` under it — plus
 `omarchy` itself and `~/.local/state` if they are not there yet. (A record that
 cannot be parsed is reported once in the shell log, so the shell journal can
 contain that file's name.) Removing the plugin does not remove that state; the
-uninstall step above does. (The
-completion alert also asks omarchy's own notification service to show a toast,
-and that service keeps its own log under `~/.local/state/omarchy/notifications/`;
-the plugin sends it no prompt, message, session name or working directory —
-only the agent's label, a fixed state word, and the window id the click needs.)
+uninstall step above does. (The completion alert also asks omarchy's own
+notification service to show a toast, and that service keeps its own log under
+`~/.local/state/omarchy/notifications/`; the plugin sends it no prompt, no
+message and no session name — only the agent's label, a fixed state word, and
+the window id the click needs.)
 
-**Privacy.** A record includes the last user prompt and the working directory.
-That state never leaves this machine. The `sessions/` directory and its
-records are created owner-only (`0700` / `0600`) so another local user cannot
-read them, and `muster-doctor` reports the modes if you want to check.
-
-The prompt, the blocked detail, the session name and the working directory
-never travel as a command-line argument, where any local process could read
-them from `/proc/<pid>/cmdline`. `bin/muster-report` takes them on file
-descriptors
-(`--prompt-fd`, `--message-fd`, `--name-fd`, `--cwd-fd`) and hands them to `jq`
-through `--rawfile`, so the values themselves never appear in any process's
-command line — only `/dev/fd/N` does. There is no `--name` / `--cwd` /
-`--prompt` / `--message` option to fall back on: they are refused. Every value
-that reaches a command line is held to a shape that cannot carry text:
-`--agent` and `--session` name the record file and are limited to a plain id
-charset (`[A-Za-z0-9._-]`), `--pid` to digits because it reaches bash
-arithmetic, `--window` to `auto`/`none`/a hex address, `--state` to the four
-state words, `--herdr-pane` to a 64-character pane id, `--tmux-pane` to a `%`
-plus digits (or empty, outside tmux), and `--tmux-socket` to a plain absolute
-path (a value that is not one is dropped, not fatal).
-
-The path is vetted the same way: every component under the state home that
-this plugin creates must be a real directory owned by you, so a symlink dropped
-at `…/omarchy/muster` cannot move the sessions directory somewhere else. The
-writer locks that directory read-only instead of taking a predictable lock
-file, and stages each record with an exclusive create written by the same open
-that fills it (`O_EXCL`), before the atomic rename — a same-user writer cannot
-plant a symlink or a hardlink and redirect the write at another file — every record operation addresses
-it through that locked descriptor, so a directory swapped out mid-run is not
-followed. The shell's mark SVGs are written the same way: the directory chain is
-entered and re-checked at each level before anything is staged. Every field is
-capped (prompt/message 240 characters, name 80, cwd 1024, pane 64, project 256)
-and the merged record is measured, so one record can never exceed the 64 KiB the
-reader accepts. A record left behind by a killed agent is deleted a week later
-when the shell next starts; a staging file from an interrupted write goes after
-an hour.
-
-The reader treats a record as untrusted: it refuses to follow a symlink,
-refuses anything that is not a plain file, and reads at most 64 KiB, so a
-record an agent writes cannot point the shell at another file, make it wait on
-a special file, or make it read without bound.
-
-## Notification content
-
-The toast ships content-free — the agent and a fixed state word, not the prompt
-— because omarchy's notification path takes the text as process arguments and
-persists it, so a prompt there would be readable from `/proc/<pid>/cmdline` and
-kept on disk ([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209),
-fix [#8259](https://github.com/basecamp/omarchy/pull/8259) pending). The
-version that does show the prompt is the `notifyContent` setting, off by
-default: switch it on in `~/.config/omarchy/shell.json` (or in omarchy's own
-settings screen, which reads the manifest's schema) and the toast carries the
-session title and the last prompt (or the project name when there is no prompt) instead. It is a setting rather than a
-source edit on purpose — an edit would be lost on the next update, and the
-privacy trade is one the user should make deliberately.
+**Privacy.** A record carries the working directory, the protocol's `title` and
+`msg`, and the ids of the terminal and the pane the session runs in. That state
+never leaves this machine. The `sessions/` directory and its records are
+created owner-only (`0700` / `0600`) so another local user cannot read them,
+and `muster-doctor` reports the modes if you want to check. A process running
+as you can still read, write or delete them: the bar is not an isolation
+boundary between same-user programs. There is no prompt
+in a record to leak: the protocol does not carry one, and this branch does not
+go looking for it.
 
 ## Using it
+
+```bash
+# run an agent under the tap: it reports, the tap writes the record
+bin/muster-tap -- claude
+bin/muster-tap -- pi
+bin/muster-tap -- codex
+bin/muster-tap -- crush
+bin/muster-tap -- omp
+```
+
+`muster-tap` forwards every byte unchanged, so the agent behaves exactly as it
+would without it; the only difference is that its OSC 7501 reports become
+records. It answers the protocol's support query itself, so an agent that waits
+for the terminal to confirm support reports even under a terminal that never
+answers — Ghostty 1.3.1, or tmux and Herdr, which drop the sequence entirely.
+It removes a live record when the agent exits (a `done`/`error` record is left
+behind).
+
+An agent that does not speak OSC 7501 is **not** a session on this branch.
+There is no hook to install and no script to call: that is the point of the
+experiment.
 
 | Where | Action |
 |-------|--------|
@@ -238,22 +193,32 @@ privacy trade is one the user should make deliberately.
 
 ```bash
 omarchy-shell shienze.muster status | jq '.details[]'
-# {"agent":"pi","state":"working","kind":"","progress":-1,"folder":"tiny-model-primitives",
-#  "pid":835161,"completedRuns":3,"window":"0x601dc3f347b0","pane":"","tmux":"%3"}
+# {"agent":"claude","state":"working","kind":"","progress":-1,"recordId":"build",
+#  "terminalId":"tap:4711:9f2c1a04","folder":"omarchy-muster","pid":4711,
+#  "window":"0x601dc3f347b0","pane":"","tmux":""}
 ```
 
 ## Settings
 
-Three settings, in `~/.config/omarchy/shell.json`:
+Two settings, in `~/.config/omarchy/shell.json`:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `soundEnabled` | `true` | Chime when a run finishes |
 | `notifyEnabled` | `true` | Desktop notification when a run finishes |
-| `notifyContent` | `false` | Put the session title and the last prompt in the notification body (it then travels through omarchy's notification argv and its log — see *Notification content*) |
 
-The first two are the toggles in the panel; the third is declared in the
-manifest, so omarchy's own settings screen offers it too.
+Both are the toggles in the panel, and both are declared in the manifest, so
+omarchy's own settings screen offers them too.
+
+**The notification is content-free**: it carries the agent's label and a fixed
+state word ("Run finished", "Run failed", "Needs your input"), never a prompt
+or a message. omarchy's notification path takes the text as process arguments
+and persists it, so anything more would be readable from `/proc/<pid>/cmdline`
+and kept on disk
+([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209), fix
+[#8259](https://github.com/basecamp/omarchy/pull/8259) pending). This branch
+has no setting that changes that: there is no prompt to show in the first
+place.
 
 Everything else is deliberately internal — a widget whose alerts went quiet
 because of a stray setting is worse than one you tune by editing a line. They
@@ -262,8 +227,8 @@ live at the top of `Service.qml`:
 | Constant | Value | Meaning |
 |----------|-------|---------|
 | `refreshIntervalSec` | `2` | Fallback rescan cadence; `inotifywait` makes new records appear at once |
-| `staleAfterSec` | `120` | Forget a record whose writer stopped (the bridge heartbeats every 30s) |
-| `settledAfterSec` | `21600` | Keep a finished (`done`/`error`) record for six hours — a writer that cleans up after itself (the pi bridge) never needs it |
+| `staleAfterSec` | `120` | Forget a record whose writer stopped |
+| `settledAfterSec` | `21600` | Keep a finished (`done`/`error`) record for six hours |
 | `debounceMs` | `2000` | One alert per 2s: a completion inside the window is dropped |
 | `soundFile` | freedesktop `complete.oga` | |
 | `soundPlayer` | `paplay` | `pw-play` / `mpv` work too |
@@ -272,36 +237,54 @@ live at the top of `Service.qml`:
 
 One JSON object per session in
 `$XDG_STATE_HOME/omarchy/muster/sessions/` (default
-`~/.local/state/...`). Any filename ending in `.json`. Write it atomically
-(temp file + `rename`) and re-touch it as a heartbeat.
+`~/.local/state/...`), named `<agent>~<session>.json`. The tap writes it
+atomically (staging file + `rename`) and replaces it whole on every report.
 
 | Field | Notes |
 |-------|-------|
-| `schemaVersion` | `2` (a `1` record still reads) |
+| `schemaVersion` | `2` |
 | `agent` | required; the protocol's `app`. Any id works, and omarchy's own aliases (`claude-code`, `oh-my-pi`, `cursor`, …) fold into their canonical agent |
-| `sessionId`, `name`, `cwd`, `project` | identity and display; `project` defaults to the basename of `cwd` |
+| `sessionId` | the tap's name for the session (`tap-<pid>-<token>`, plus a digest for a child id) |
+| `name` | the protocol's `title`; a short label |
+| `cwd` | where the session runs |
+| `project` | the basename of `cwd` |
 | `state` | `working` \| `blocked` \| `done` \| `error` \| `idle` \| `unknown` |
-| `kind` | `permission` \| `question` \| `auth`, when `blocked` |
-| `progress` | integer `0`–`100`, or `-1` for absent |
-| `recordId` | the protocol's hierarchical `id` (`build/test`); display only |
-| `terminalId` | a stable id for the pty/tap instance that owns the record (`tap:<pid>:<token>`); the bar keeps one card per record file, so one tap can own several records |
+| `kind` | `permission` \| `question` \| `auth`, when `blocked`; absent otherwise |
+| `progress` | integer `0`–`100`, or `-1` for absent; kept only while `working` or `blocked` |
+| `recordId` | the protocol's hierarchical `id` (`build/test`); display only, never a path |
 | `message` | the protocol's `msg`; shown when `blocked`, `done` or `error` |
-| `lastPrompt` | shown on the card |
-| `pid` | owning process; a hint for display/focus, not the record identity (the bar keys one card per record file) |
+| `pid` | the agent's process; a hint for display/focus, not the record identity |
 | `windowAddress` | Hyprland address; makes the notification's click focus that terminal |
 | `herdrPane` | herdr pane id (`w1:p6`); a herdr session's pane has no window of its own, so a click switches to it with `herdr agent focus` |
 | `tmuxPane` | tmux pane id (`%3`); a click selects the window and pane and moves the attached client to it |
 | `tmuxSocket` | tmux server socket (absolute path, from `$TMUX`); empty means the default server |
+| `terminalId` | a stable id for the tap that owns the record (`tap:<pid>:<token>`); the bar keeps one card per record file, so one tap can own several records |
 | `updatedAt` | ms epoch; drives staleness (`staleAfterSec`, `settledAfterSec`) |
-| `completedRuns` | **the alert trigger** — increment once per finished run |
-| `seq` | monotonic writer counter, used to pick the freshest of two records for one pid |
 
-The alert fires when a run finishes: the `completedRuns` counter **increases**,
-or the state **settles** into `done`/`error`. Comparing the counter survives a
-scan interval that missed a fast `working → done` flip; the state edge catches a
-writer that only reports states. A settled record outlives its writer and ages
-on the much longer `settledAfterSec` clock, and focusing it acknowledges it, so
-the card falls back to `idle`.
+There is no `lastPrompt` and no `completedRuns`: the protocol carries no prompt
+and no run counter, so the record has nowhere to put them. A card shows the
+agent, the folder, the state and the protocol's own `msg` — nothing more.
+
+**The alert fires on the state edge into `done` or `error`**: the record was
+`working` (or `blocked`) and is now settled. There is no counter to compare,
+because the protocol does not have one. A run that finished after Muster
+started is still announced once if a scan missed the working edge; a record
+already settled before Muster started stays silent. A settled record outlives its writer
+and ages on the much longer `settledAfterSec` clock, and focusing it
+acknowledges it, so the card falls back to `idle`.
+
+**Several records per terminal.** A report with an `id` (`build/test`) is a
+record of its own, filed under its own file, with its own card; a report with
+no id is the terminal's root record. A record without an `app` inherits the app
+of its nearest ancestor. `state=clear` is a command, not a state: it removes
+the addressed record **and every record beneath it**, and a clear with no id
+removes every record of that terminal.
+
+**Lifetime.** `working` and `blocked` are dropped when the agent exits and when
+a new shell prompt appears (OSC 133 `A`); `done` and `error` survive both, so
+the user finds the result. Muster adds its own clock on top: a record whose
+writer stopped goes stale after `staleAfterSec`, a settled one ages out after
+`settledAfterSec`, and the shell prunes anything older than seven days.
 
 ## The agents omarchy ships
 
@@ -341,137 +324,48 @@ given). Adding an agent is one line in the `AGENTS` table at the top of
 `Service.qml`'s `markScript` if you want the completion toast to carry that
 agent's icon too, since the toast icon is a generated SVG named after the id.
 
-## Adding another agent
+## Native emitters
 
-### The protocol way (no hook needed)
+An agent has to speak OSC 7501 itself to be a session on this branch. The
+matrix, with the upstream evidence, is in
+[`docs/native-emitters.md`](docs/native-emitters.md); the short version:
 
-If the agent can emit [OSC 7501][osc7501] itself, run it under the pty filter and
-there is nothing else to write:
+| Agent | Since | Emission |
+|---|---|---|
+| Claude Code | 2.1.295 | probe-gated: it waits for the terminal's answer to `OSC 7501;?` |
+| pi | 1.1.0 | probe-gated; `PI_PROGRAM_STATUS=1` forces it on |
+| Crush | 0.98.0 | unconditional |
+| omp | 18.8.7 | reports `blocked` with `kind=question` / `kind=permission` |
+| Codex | 0.163.0 | unconditional whenever stdout is a terminal |
+| Docker Agent | 1.150.0 | TUI and lean mode |
+| Factory Droid | 0.236.0 | inferred from the changelog wording |
 
-```bash
-~/.config/omarchy/plugins/shienze.muster/bin/muster-tap --agent claude -- claude
-```
-
-`muster-tap` forwards the agent's output unchanged and turns every report it sees
-into a record, so an agent that already speaks the protocol needs no per-agent
-code — and there are several now (Claude Code 2.1.295+, pi 1.1.0+, Crush 0.98+,
-omp 18.8.7+, Codex 0.163.0+; see
-[`docs/native-emitters.md`](docs/native-emitters.md)). It answers the
-protocol's support query itself, so an agent that waits for the terminal to
-confirm support reports even under a terminal that never answers — Ghostty
-1.3.1, or tmux and Herdr, which drop the sequence entirely. It removes a live
-record when the agent exits (a `done`/`error` record is left behind).
-
-**One source per session.** If the agent speaks the protocol natively, the tap
-is that source: do not also run a hook or the pi bridge's OSC emission for the
-same session, or the same run turns into two records. The pi bridge writes
-only its record by default for exactly this reason; its own terminal emission
-is the opt-in `MUSTER_EMIT_OSC=1`. When pi runs under the tap, the tap sets
-`MUSTER_TAP=1` and the bridge stands down entirely, so pi appears exactly
-once.
-
-A hook can also hand the protocol body straight to the writer:
-
-```bash
-printf '%s' "$OSC_BODY" | $report --agent claude --session "$ID" \
-        --osc-fd 0 --emit-osc tty
-```
-
-`--emit-osc tty` mirrors the report back to the terminal, so a terminal that
-shows OSC 7501 (Rex today, Kitty on master) lights up as well.
-
-### The record way
-
-`bin/muster-report` is the writer for everything that is not pi:
-
-```bash
-report=~/.config/omarchy/plugins/shienze.muster/bin/muster-report
-
-printf '%s' "$PROMPT" | $report --agent claude --session "$SESSION_ID" \
-        --state working --name-fd 3 --prompt-fd 0 3<<<"$TITLE"
-printf '%s' "approve" | $report --agent claude --session "$SESSION_ID" \
-        --state blocked --kind permission --message-fd 0
-$report --agent claude --session "$SESSION_ID" --state done  # chime + popup
-$report --agent claude --session "$SESSION_ID" --state error
-$report --agent claude --session "$SESSION_ID" --remove
-```
-
-`--state done` and `--state error` are the settled states: they trigger the
-alert and survive the process. `--state clear` removes the record, like
-`--remove`.
-
-Everything you would otherwise type goes in on a file descriptor —
-`--prompt-fd`, `--message-fd`, `--name-fd`, `--cwd-fd` — never as an argument,
-because a command line is world-readable through `/proc/<pid>/cmdline` while
-the process runs. `0` is stdin; any other descriptor works too, and a here-string
-(`3<<<"$TITLE"`) is the shortest way to hand one over. The working directory
-defaults to the caller's `$PWD`, so `--cwd-fd` is only needed when the agent
-runs somewhere else.
-
-It resolves the terminal window from `--pid` (default `$PPID`) through the
-Hyprland client list, so the notification's click focuses the right terminal
-without extra plumbing. A multiplexer hides the pane from that window: the pane's
-process either has no window in its ancestry (herdr's parent is the
-`herdr server` daemon) or the window belongs to the server, not the pane.
-Inside herdr the report records `$HERDR_PANE_ID`; inside tmux it records
-`$TMUX_PANE` and the socket from `$TMUX`, so the click moves the multiplexer to
-that pane as well as focusing the terminal. `--herdr-pane`, `--tmux-pane` and
-`--tmux-socket` override the environment when a wrapper knows better. A pane id
-is stable for the life of the pane, so a later report that carries no pane
-(a hook with no multiplexer in its environment) keeps the one already in the
-record instead of erasing it. A Claude Code `Stop` hook is then one line:
-
-```jsonc
-// ~/.claude/settings.json
-{ "hooks": { "Stop": [ { "hooks": [ { "type": "command",
-  "command": "~/.config/omarchy/plugins/shienze.muster/bin/muster-report --agent claude --session \"$CLAUDE_SESSION_ID\" --state idle --completed" } ] } ] } }
-```
-
-### What omarchy does and does not provide
-
-There is no unified agent-state hook to plug into. What exists is adjacent:
-
-- `omarchy agent` launches the default agent and stamps every launched window
-  with the class **`org.omarchy.agent`** (deliberately the same class for all of
-  them, for window rules and themes). That is a reliable "this is an
-  omarchy-launched agent window" signal, but it says nothing about which agent
-  it is or whether it is working — and `--inline` skips it.
-- `~/.config/omarchy/hooks/<event>.d/` are lifecycle hooks only:
-  `battery-low`, `font-set`, `post-boot`, `post-update`, `pre-refresh-pacman`,
-  `theme-set`. None of them fire on agent activity.
-- `omarchy-agent-usage-<agent>` *is* a unified plugin interface, but for quota:
-  one collector per agent, writing one JSON record that `omarchy.agents` reads.
-  This plugin deliberately mirrors that shape for live state.
-
-So state has to come from the agent itself: a hook where the agent has one
-(Claude's `Stop`, Codex's `notify`, pi's extension API), or a wrapper where it
-has not. Either way the sink is the same one-line call above.
+Probe-gated emitters stay silent under a terminal that does not answer the
+query — Ghostty 1.3.1, or tmux and Herdr, which drop the sequence. That is
+what the tap is for: it answers the query on the pane's behalf.
 
 ## Dependencies
 
-No build step, no package manager, no network access. The languages are the
-hosts' contracts, not a choice: an omarchy bar widget/service must be QML, a pi
-extension must be TypeScript.
+No build step, no package manager, no network access. The language of the
+writer is Python because it is a per-session pty filter, and Python's `pty` and
+`termios` are the shortest honest way to filter a terminal.
 
 | Piece | Language | Depends on |
 |-------|----------|-----------|
-| `Service.qml`, `BarWidget.qml`, `Panel.qml`, `Record.qml` | QML | omarchy shell (Quickshell, Qt 6), `bash`, `find`, `sort`, `head`, `stat`, `dd`, `mkdir`, `chmod`, `timeout`, `hyprctl`, `head`, `od`, `inotifywait` (optional), `tmux` / `herdr` (optional; only for a session inside them) |
+| `Service.qml`, `BarWidget.qml`, `Panel.qml`, `Record.qml` | QML | omarchy shell (Quickshell, Qt 6), `bash`, `find`, `sort`, `head`, `stat`, `dd`, `mkdir`, `chmod`, `timeout`, `od`, `tr`, `hyprctl`, `inotifywait` (optional), `tmux` / `herdr` (optional; only for a session inside them) |
 | `Model.js` | JavaScript (QML engine) | nothing |
-| `pi/muster.ts` | TypeScript | pi's bundled Bun runtime; node builtins only, zero npm packages |
-| `bin/muster-report` | Bash | `jq`, `flock`, `stat`, `dd`, `mv`, `chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od`, `base64`, `rm`, `hyprctl` |
-| `bin/muster-tap` | Python 3 | `pty`, `termios`, `select`, `fcntl`, `struct` (all stdlib); optional — only for an agent that emits OSC 7501 with no hook |
+| `bin/muster-tap` | Python 3 | `pty`, `termios`, `select`, `fcntl`, `struct`, `json`, `base64`, `hashlib`, `secrets` (all stdlib) |
 | alerts | — | `paplay` (or `pw-play`/`mpv`) and `omarchy-notification-send` |
 
 `bin/muster-doctor` checks all of these (`--json` for machines) and exits
-non-zero when a required one is missing. An unlinked pi bridge is reported as
-optional, not missing: the bridge is only needed if you use pi.
+non-zero when a required one is missing. It also checks the state directory:
+it must be a real, owner-only (`0700`) directory, and the records in it must
+be owner-only (`0600`) plain files.
 
-Rust would not help here. It cannot be a Quickshell plugin or a pi extension,
-so a compiled component could only be a separate daemon with a socket — which
-is the heavy thing this plugin exists to avoid — or a replacement for a
-`jq`+`flock` script on a machine that already ships both. `bin/muster-tap` is
-Python on purpose: it is a per-session wrapper, not a daemon, and Python's `pty`
-and `termios` are the shortest honest way to filter a terminal.
+Rust would not help here. It cannot be a Quickshell plugin, so a compiled
+component could only be a separate daemon with a socket — which is the heavy
+thing this plugin exists to avoid. `bin/muster-tap` is Python on purpose: it is
+a per-session wrapper, not a daemon, and the standard library is enough.
 
 ## Deliberately out of scope
 
@@ -480,10 +374,8 @@ sniffing). It was built, it worked, and it was ~700 extra lines plus a rule
 engine, because a widget outside the terminal cannot see the pane contents —
 and terminals that host several windows in one process (ghostty
 single-instance, kitty) make `pid → window` ambiguous, so a title match alone
-proves very little. The honest fix for a new agent is a hook. If automated
-detection is ever wanted, the cheap version is gated on omarchy's own
-`org.omarchy.agent` class rather than on process sniffing, and it belongs in
-its own small plugin, not here.
+proves very little. On this branch the answer is narrower still: an agent that
+does not speak the protocol is not a session, and there is no hook to install.
 
 ## Files
 
@@ -495,30 +387,32 @@ its own small plugin, not here.
 | `Panel.qml` | session panel and the two toggles |
 | `Record.qml` | one watched session record |
 | `Model.js` | record normalization, ordering, agent names and marks |
-| `pi/muster.ts` | pi → record + OSC 7501 bridge (the OSC part is opt-in: `MUSTER_EMIT_OSC=1`) |
-| `bin/muster-report` | record writer and OSC 7501 front end for other agents |
-| `bin/muster-tap` | optional pty receiver: OSC 7501 on the wire → records |
-| `bin/muster-doctor` | dependency check |
+| `bin/muster-tap` | the pty receiver and the only writer: OSC 7501 on the wire → records |
+| `bin/muster-doctor` | dependency and state check |
 | `docs/osc7501.md` | how Muster speaks the Program Status Protocol |
+| `docs/osc7501-plan.md` | what this branch is, and what was taken out of it |
 | `docs/native-emitters.md` | who speaks OSC 7501 today, with versions and upstream evidence |
-| `assets/` | README screenshots |
-| `preview.png` | root listing card for the marketplace (optional) |
 | `docs/submission-body.md` | the exact issue body for a marketplace listing |
 | `docs/marketplace-submission.md` | how to file that issue |
+| `assets/` | README screenshots |
+| `preview.png` | root listing card for the marketplace (optional) |
 
 ## Troubleshooting
 
 ```bash
 omarchy-shell shienze.muster status | jq '.details[]'   # what the widget sees
-~/.config/omarchy/plugins/shienze.muster/bin/muster-doctor   # dependencies
+~/.config/omarchy/plugins/shienze.muster/bin/muster-doctor   # dependencies and state
 journalctl --user --since "5 min ago" -o cat SYSLOG_IDENTIFIER=omarchy-shell | grep -i muster
 omarchy-shell shienze.muster test                        # prove the alert path
 ```
 
-- **Chip stays dim**: no record is being written. Run an agent, or write one by
-  hand with `muster-report`.
+- **Chip stays dim**: no record is being written. Run the agent under
+  `bin/muster-tap`, and check that the agent speaks OSC 7501 at all — see the
+  matrix in `docs/native-emitters.md`.
+- **Nothing at all under tmux or Herdr**: those drop the OSC 7501 sequence, so
+  the agent has to run under the tap — which answers the probe for it.
 - **A session lingers after a crash**: it disappears from the widget
-  `staleAfterSec` after the last heartbeat, and its record is deleted a week
+  `staleAfterSec` after the last write, and its record is deleted a week
   later (the shell prunes old records when it starts).
 - **No sound**: `command -v paplay`, and check the *Sound* toggle in the panel.
 - **IPC function missing after an edit**: `omarchy restart shell`.

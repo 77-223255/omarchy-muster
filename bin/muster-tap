@@ -11,8 +11,8 @@ https://www.superlogical.com/rex/docs/build/program-status
 Every other writer in this plugin needs the agent to call it. This one does
 not: it is a pty filter, the way `script(1)` is. It runs the command on a
 pseudo-terminal, forwards every byte unchanged to the real terminal, and when
-it sees an OSC 7501 report in the stream it publishes the same report as a
-record. That makes any program which already speaks OSC 7501 — no hook, no
+it sees an OSC 7501 report in the stream it writes that report as a record.
+That makes any program which already speaks OSC 7501 — no hook, no
 per-agent code — a first-class session to the widget.
 
 It answers the spec's feature-detection query (`OSC 7501;?`) itself, so a
@@ -27,10 +27,18 @@ of this tap, and a new shell prompt (OSC 133 `A`) or the exit of the child
 drops the records that are still running — `done` and `error` survive both.
 
 It is deliberately a per-session wrapper, not a daemon: nothing runs in the
-background, and nothing listens on a socket. It writes records by calling
-bin/muster-report with the report on a descriptor, so the record path vetting,
-the atomic O_EXCL publish, the field caps and the OSC parsing all live in one
-audited place; this program only reads the wire.
+background, and nothing listens on a socket. It writes the records itself,
+in this file, with the Python standard library only: no writer process, no
+shell pipeline, no lock file, no jq. A record is written to a staging file
+in the sessions directory and renamed onto its final
+name, so a reader never sees half a record. The sessions directory is opened
+once, with O_NOFOLLOW, and every write and every removal goes through that
+descriptor: a same-user process that renames the directory or plants a
+symlink at any component of the path cannot redirect a record.
+
+If the sessions directory cannot be opened the tap says so once and keeps
+relaying the bytes: a broken state directory must not cost the user their
+terminal.
 
 A tap is a filter, so it has to survive whatever runs under it. A few rules
 keep that true:
@@ -39,21 +47,23 @@ keep that true:
     the pty queue, and a blocking write there would freeze the tap — and with
     it the terminal it is in front of. Every write goes through `write_all`,
     which waits out a short write instead of dropping the rest.
-  * The writer is never called from the read path. Reports are queued,
-    coalesced per record file, and flushed in small batches with a deadline,
-    so a program that reports in a burst cannot make the tap spawn thousands
-    of writers, and a slow writer cannot stall the relay.
-  * The registry of records is bounded (the spec caps a terminal at 256
-    records); the least recently updated record is evicted when it is full,
+  * A record is written where the report is read, because the write is
+    cheap: one small file and one rename. A rate cap keeps a program that
+    reports in a burst from turning the tap into a file-system benchmark; the
+    staging file is renamed, not fsynced, so a report does not wait for disk.
+  * The registry of records is bounded at 64 (the spec's minimum; 256 is the
+    maximum); the least recently updated record is evicted when it is full,
     and every file the tap owns is removed when it exits.
   * The name of a record always carries a digest of the protocol id, and
     every tap carries a random token in its names, so one program cannot
     address — or delete — the record of another.
 
-This script is optional. It is only needed for an agent that emits OSC 7501
-itself; every agent with a hook still uses muster-report directly.
+This script is the only writer in this branch. An agent that does not speak
+OSC 7501 itself is not a session here.
 """
 
+import base64
+import binascii
 import fcntl
 import hashlib
 import json
@@ -92,6 +102,9 @@ STATES = {"idle", "working", "done", "blocked", "error"}
 SETTLED = {"done", "error"}
 # `working` and `blocked` are live: a new shell prompt means the run is over.
 LIVE = {"working", "blocked"}
+# The kinds a blocked report may carry. An unknown kind is absent, not a
+# reason to drop the report.
+KINDS = {"permission", "question", "auth"}
 
 # The wire grammar of the spec: a key is 1..16 lowercase letters, a value is
 # made of the characters below. Whitespace around a key or a value is trimmed,
@@ -103,29 +116,44 @@ VALUE_RE = re.compile(r"^[A-Za-z0-9_.,+/=-]*$")
 # which is 263 characters in all (8 x 32 + 7 separators).
 ID_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,32}(?:/[A-Za-z0-9_.+-]{1,32}){0,7}$")
 MAX_ID_LEN = 263
-# The shape muster-report holds an agent or a session id to; the tap never
-# hands it anything else.
+# The shape an agent or a session id is held to: letters, digits, dot, dash,
+# underscore. The file name of a record carries the session, so a session has
+# to be a plain token.
 ID_SHAPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
-# The writer trims ASCII whitespace around a key and a value. Python's
+# The tap trims ASCII whitespace around a key and a value. Python's
 # `str.strip()` would also trim Unicode spaces, so the tap could accept a
-# pair the writer refuses — the two would then disagree about the report.
+# pair the spec does not — the two would then disagree about the report.
 # Only the characters below are whitespace here.
 ASCII_WS = " \t\r\n\v\f"
 ASCII_WS_BYTES = ASCII_WS.encode("ascii")
 
+# The spec's limits for the free text of a report: the encoded value and the
+# decoded text. A value that is over its limit discards the whole report.
+MAX_TITLE_ENC = 256
+MAX_TITLE_DEC = 192
+MAX_MSG_ENC = 2732
+MAX_MSG_DEC = 2048
+# The caps of the record itself. They are the spec's own limits, so a
+# conforming report is never cut short.
+MAX_NAME = 192
+MAX_MESSAGE = 2048
+MAX_AGENT = 32
+MAX_SESSION = 64
+MAX_CWD = 1024
+MAX_PROJECT = 256
+# A control character in the text of a report is a forgery attempt, not a
+# line break: the spec forbids the C0 range, DEL and the C1 range.
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
 # The spec requires at least 64 records per terminal and allows a lower cap.
 # 64 is plenty for a tap's children, and it bounds the exit cleanup: every
-# live record costs one removal call there. The oldest record is evicted.
+# live record costs one removal there. The oldest record is evicted.
 MAX_RECORDS = 64
-# The queue is bounded by both calls and distinct files. A hostile child can
-# otherwise accumulate one removal entry per evicted id forever.
-MAX_PENDING = 256
-MAX_PENDING_KEYS = 128
 # One read can hold thousands of minimal sequences; parsing all of them in
 # one tick is a CPU amplifier. The rest of the read is dropped: a normal
 # agent never approaches this, and the registry is capped well below it.
-MAX_EVENTS_PER_READ = 256
+MAX_EVENTS_PER_READ = 32
 # A tap answers a bounded number of feature queries. A program that asks in a
 # loop must not be able to make the tap write to the pty forever.
 PROBE_LIMIT = 32
@@ -134,23 +162,15 @@ PROBE_TIMEOUT = 0.05
 # How long the user input may wait for room in the pty before it is dropped.
 # Normal input never waits; only a child that stopped reading its stdin does.
 INPUT_TIMEOUT = 0.1
-# The writer is flushed in small batches out of the relay loop: at most this
-# many calls per batch, at most this often, and never longer than the
-# deadline of one batch. The relay must not stall for a slow writer.
-FLUSH_BATCH = 4
-FLUSH_INTERVAL = 0.15
-WRITER_INFLIGHT = 4
-# A per-tap token bucket, not just a per-batch limit: a child that keeps the
-# queue full could otherwise drive ~27 writer processes per second, each a
-# shell pipeline, and starve every other integration on the shared lock.
-WRITER_RATE = 6.0
-WRITER_BURST = 6.0
-# The last flush, when the child is gone, may take longer: the settled
-# records have to reach the disk, and every record that is still running
-# has to be taken off it.
-FINAL_FLUSH = 3.0
-# One writer call never runs longer than this.
-WRITER_TIMEOUT = 5.0
+# The rate at which records may be written. A direct write is cheap, but a
+# child that reports in a loop must not be able to turn the tap into a
+# file-system benchmark. The bucket is per tap, and a report that does not
+# fit is dropped: the next report of that id replaces the file anyway.
+WRITE_RATE = 64.0
+WRITE_BURST = 64.0
+# How long the relay waits for the pty when nothing happens. The clock moves
+# on even when there is nothing to do, so the relay never spins.
+RELAY_TIMEOUT = 0.2
 
 
 def fail(message):
@@ -162,99 +182,253 @@ def now():
     return time.monotonic()
 
 
-def safe_env():
-    """A fixed PATH for the tools the writer and the tap invoke.
+# ------------------------------------------------------------- the store
 
-    The child inherits the user's environment, but it must not be able to
-    plant a `jq`/`hyprctl` in a writable PATH directory and have the tap run
-    it. The Muster tools live in /usr/bin on Omarchy.
+class StoreError(Exception):
+    """The sessions directory is not usable."""
+
+
+def state_base():
+    """The state home: XDG_STATE_HOME, else ~/.local/state.
+
+    XDG wants an absolute path. A relative one would put the records next to
+    wherever the tap happens to run, and one that starts with a dash is
+    read as an option by everything that touches a path.
     """
-    env = dict(os.environ)
-    env["PATH"] = "/usr/bin:/bin"
-    env["LC_ALL"] = "C"
-    return env
+    base = os.environ.get("XDG_STATE_HOME", "")
+    if not base:
+        home = os.environ.get("HOME", "")
+        if not home:
+            raise StoreError("neither XDG_STATE_HOME nor HOME is set")
+        base = os.path.join(home, ".local", "state")
+    if not os.path.isabs(base):
+        raise StoreError(f"the state home must be an absolute path: {base}")
+    trimmed = base.rstrip("/")
+    return trimmed or "/"
 
 
-def vetted_report(path, label):
-    """Resolve `path` and refuse a writer that another user could replace."""
-    path = os.path.realpath(path)
-    try:
-        info = os.stat(path)
-    except OSError as error:
-        fail(f"{label} is not usable: {error}")
-    if not stat.S_ISREG(info.st_mode):
-        fail(f"{label} must be a regular file")
-    if info.st_uid != os.getuid():
-        fail(f"{label} must belong to the user who runs the tap")
-    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        fail(f"{label} must not be writable by anyone else")
-    if not os.access(path, os.X_OK):
-        fail(f"{label} is not executable")
-    parent = os.path.dirname(path)
-    try:
-        pinfo = os.stat(parent)
-    except OSError:
-        pinfo = None
-    if pinfo is not None and pinfo.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        fail(f"the directory of {label} must not be writable by anyone else")
-    return path
+def sanitize(value, cap):
+    """A plain, path-safe token: the shape of a file name component.
 
-
-def report_path():
-    """The writer this tap calls.
-
-    `MUSTER_REPORT` may point somewhere else, and the default `bin/muster-report`
-    is vetted the same way: absolute real path, regular file, owned by the
-    user, not writable by anyone else, executable, in a directory nobody else
-    can write. A symlink is resolved before the check, so the file that is
-    checked is the file that is run.
+    Everything outside `[A-Za-z0-9._-]` becomes an underscore and the result
+    is cut to `cap` characters. The file name of a record is
+    `agent~session.json`, so both parts have to survive this.
     """
-    override = os.environ.get("MUSTER_REPORT")
-    if override:
-        if not os.path.isabs(override):
-            fail("MUSTER_REPORT must be an absolute path")
-        return vetted_report(override, "MUSTER_REPORT")
-    here = os.path.dirname(os.path.realpath(__file__))
-    return vetted_report(os.path.join(here, "muster-report"), "bin/muster-report")
-
-
-# A record id is an id, not text: muster-report holds --agent/--session to a
-# plain charset, so a protocol `app` that carries anything else is reduced
-# here before it is handed over as an option value.
-def valid_app(value):
-    """The spec's app grammar: [A-Za-z0-9_.+-]{1,32}."""
-    return bool(re.fullmatch(r"[A-Za-z0-9_.+-]{1,32}", value or ""))
-
-
-def safe_agent(value, fallback="agent"):
-    value = re.sub(r"[^A-Za-z0-9._-]", "_", str(value or ""))
-    value = re.sub(r"^[^A-Za-z0-9]+", "", value)
-    return (value or fallback)[:64]
-
-
-# The file name of a record holds the session id, so a protocol id has to be
-# reduced to a plain token. The digest is ALWAYS appended: sanitising maps a
-# `/` to a `_` and a long id is cut short, so a token alone is not unique.
-# Worse, a lossy token can be spelled out by hand — `a_b-1a2b3c4d` is a
-# legal id — and it would then name the file of `a/b`, so one program could
-# delete the record of another. With the digest always there, two different
-# ids never share a file.
-def session_token(value, budget):
     token = re.sub(r"[^A-Za-z0-9._-]", "_", str(value or ""))
-    digest = hashlib.blake2b(str(value).encode("utf-8", "replace"),
-                             digest_size=8).hexdigest()
-    suffix = "-" + digest
-    room = budget - len(suffix)
-    if room < 1:
-        room = 1
-    return token[:room] + suffix
+    return token[:cap]
 
 
-def valid_id(value):
-    """The spec's id grammar: 263 characters in all, 32 per level, 8 levels."""
-    if not value or len(value) > MAX_ID_LEN:
-        return False
-    return bool(ID_RE.fullmatch(value))
+def record_name(agent, session):
+    """The name of the file of a record."""
+    return f"{sanitize(agent, MAX_AGENT)}~{sanitize(session, MAX_SESSION)}.json"
+
+
+class RecordStore:
+    """The sessions directory of the plugin, opened once and kept open.
+
+    Every record is written and removed through the descriptor of this
+    directory, so a same-user process that renames the directory or plants a
+    symlink at any component of the path cannot redirect a record: the
+    descriptor addresses the inode that was vetted when the tap started.
+
+    The chain under the state home is created with mode 0700 and every
+    component is refused when it is a symlink, not a directory or not owned
+    by this user. The state home itself is left alone: a user who symlinks
+    XDG_STATE_HOME into a dotfiles repo did that on purpose.
+    """
+
+    def __init__(self, base=None):
+        self.base = base
+        self.path = None
+        self.fd = None
+
+    # ------------------------------------------------------------- setup
+
+    def open(self):
+        """Open the sessions directory; raise StoreError when it is unsafe.
+
+        Each component is created and opened relative to its parent's
+        descriptor with O_NOFOLLOW, then chmod'ed through that descriptor.
+        There is no path chmod and no window in which a symlink planted at an
+        intermediate component can redirect the setup.
+        """
+        base = self.base or state_base()
+        self.base = base
+        self._prepare_base(base)
+        try:
+            fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError as error:
+            raise StoreError(f"cannot open {base}: {error}")
+        path = base
+        try:
+            for part in ("omarchy", "muster", "sessions"):
+                path = os.path.join(path, part)
+                child = self._enter(fd, part)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                fd = child
+            info = os.fstat(fd)
+            mode = stat.S_IMODE(info.st_mode)
+            if mode != 0o700:
+                raise StoreError(f"{path} is mode {mode:o}, not 700; refusing")
+            try:
+                on_disk = os.stat(path, follow_symlinks=False)
+            except OSError as error:
+                raise StoreError(f"{path}: {error}")
+            if stat.S_ISLNK(on_disk.st_mode):
+                raise StoreError(f"{path} is a symlink; refusing")
+            if (on_disk.st_dev, on_disk.st_ino) != (info.st_dev, info.st_ino):
+                raise StoreError(f"{path} changed while it was being opened")
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        self.path = path
+        self.fd = fd
+        return self
+
+    def _enter(self, parent_fd, part):
+        """Create/open one component under `parent_fd`, no symlink following."""
+        try:
+            os.mkdir(part, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise StoreError(f"cannot create {part}: {error}")
+        try:
+            fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                         dir_fd=parent_fd)
+        except OSError as error:
+            raise StoreError(f"cannot open {part}: {error}")
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISDIR(info.st_mode):
+                raise StoreError(f"{part} is not a directory")
+            if info.st_uid != os.getuid():
+                raise StoreError(f"{part} is not owned by this user")
+            try:
+                os.fchmod(fd, 0o700)
+            except OSError:
+                pass
+            mode = stat.S_IMODE(os.fstat(fd).st_mode)
+            if mode != 0o700:
+                raise StoreError(f"{part} is mode {mode:o}, not 700; refusing")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def close(self):
+        """Give the directory back; the tap is done with it."""
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+
+    @staticmethod
+    def _prepare_base(base):
+        """The state home has to be a directory; a symlink there is allowed."""
+        try:
+            info = os.stat(base)
+        except FileNotFoundError:
+            try:
+                os.mkdir(base, 0o700)
+            except OSError as error:
+                raise StoreError(f"cannot create {base}: {error}")
+            info = os.stat(base)
+        except OSError as error:
+            raise StoreError(f"{base}: {error}")
+        if not stat.S_ISDIR(info.st_mode):
+            raise StoreError(f"{base} is not a directory")
+
+    # ------------------------------------------------------------- write
+
+    def write(self, agent, session, record):
+        """Publish one record; the file is replaced, never appended to.
+
+        The record is written to a staging file and renamed onto its final
+        name, so a reader sees either the old record
+        or the new one and never a half-written file.
+        """
+        if self.fd is None:
+            return False
+        name = record_name(agent, session)
+        try:
+            payload = json.dumps(record, separators=(",", ":"),
+                                 ensure_ascii=False)
+        except (TypeError, ValueError):
+            return False
+        data = payload.encode("utf-8", "replace")
+        # A fresh name every time, created with O_EXCL: a name that already
+        # exists — including one planted as a hardlink — makes the open fail
+        # instead of being followed or truncated.
+        staging = f".muster.{secrets.token_hex(8)}.tmp"
+        try:
+            fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
+        except OSError:
+            return False
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            self._discard(staging)
+            os.close(fd)
+            return False
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short write")
+                view = view[written:]
+            mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        except OSError:
+            self._discard(staging)
+            return False
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if mode != 0o600:
+            # The file was created with mode 0600; a filesystem that ignores
+            # POSIX modes would leave the record readable by every local
+            # user, so it is not published.
+            self._discard(staging)
+            return False
+        try:
+            os.replace(staging, name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        except OSError:
+            self._discard(staging)
+            return False
+        return True
+
+    def remove(self, agent, session):
+        """Take one record off the disk."""
+        if self.fd is None:
+            return False
+        name = record_name(agent, session)
+        try:
+            os.unlink(name, dir_fd=self.fd)
+        except OSError:
+            return False
+        return True
+
+    def _discard(self, staging):
+        """Take a staging file away; it never becomes a record."""
+        if self.fd is None:
+            return
+        try:
+            os.unlink(staging, dir_fd=self.fd)
+        except OSError:
+            pass
+
 
 
 # ------------------------------------------------------------------ output
@@ -314,8 +488,9 @@ class Output:
     A blocking os.write(stdout) can sit in the kernel when the terminal or a
     pipe stops draining; doing it on the relay thread would freeze parsing,
     input and cleanup, and SIGTERM could not break it. The relay only enqueues;
-    this daemon thread drains the queue. When the queue is full the oldest
-    chunk is dropped, which is the right trade for a slow reader.
+    this daemon thread drains the queue. When the queue is full the newest
+    chunk is dropped, so the prefix of the stream stays intact; a slow reader
+    may still lose a tail, but it cannot make the relay block.
     """
 
     def __init__(self, fd):
@@ -388,11 +563,10 @@ def read_input(fd):
         return None
     if data:
         return data
-    try:
-        blocking = os.get_blocking(fd)
-    except OSError:
-        blocking = True
-    return None if blocking else b""
+    # A readable descriptor that returns no bytes is at EOF (a non-blocking
+    # EAGAIN raises BlockingIOError above). Treat it as the end either way,
+    # or select would keep reporting it readable and the relay would spin.
+    return None
 
 
 # --------------------------------------------------------------- the wire
@@ -465,11 +639,12 @@ class Scanner:
             ends = [end for end in (bel, st, c1) if end != -1]
             if not ends:
                 if size - body_start > MAX_BODY:
-                    # Over the cap with no terminator: drop the prefix and
-                    # resynchronise inside the stream instead of consuming
-                    # everything up to a later, unrelated terminator.
-                    pos = body_start
-                    continue
+                    # An unterminated body over the cap: drop the rest of this
+                    # read. Resyncing at the next prefix would re-scan the
+                    # same 4 KiB window for every 7-byte prefix and turn a
+                    # 64 KiB read into a CPU amplifier.
+                    pos = size
+                    break
                 # Wait for the rest of the sequence; keep what we have.
                 pos = start
                 break
@@ -504,6 +679,7 @@ class Scanner:
         self.buf = buf[pos:]
         return events
 
+
 def parse_pairs(body):
     """The protocol's key=value list, parsed defensively.
 
@@ -512,8 +688,11 @@ def parse_pairs(body):
     A repeated key keeps the last value, and whitespace around a key or a
     value is trimmed — but never inside a value, because a space is outside
     the charset and the pair is malformed anyway. Only ASCII whitespace is
-    trimmed, exactly like the writer does it, so the two never disagree
-    about a pair.
+    trimmed, so the tap never reads as a pair the spec does not allow.
+
+    A malformed *id* is worse than a malformed other pair: dropping it would
+    turn the report into an id-less (root) report, so the whole report is
+    marked bad and dropped.
     """
     pairs = {}
     bad_id = False
@@ -529,14 +708,120 @@ def parse_pairs(body):
         if not KEY_RE.fullmatch(key):
             continue
         if not VALUE_RE.fullmatch(value):
-            # An id that is present but malformed must invalidate the whole
-            # report. Dropping the pair would make it look absent, and an
-            # absent id addresses the root record (or a root clear).
             if key == "id":
                 bad_id = True
             continue
         pairs[key] = value
     return pairs, bad_id
+
+
+def decode_text(encoded, max_encoded, max_decoded):
+    """Decode a free-text value of a report.
+
+    The spec's rule is all-or-nothing: a value that does not decode, that
+    decodes to a control character or that is over its limit is not a text,
+    and the report that carries it is discarded. `None` means that.
+    """
+    if not encoded:
+        return ""
+    if len(encoded) > max_encoded:
+        return None
+    # The padding is optional on the wire.
+    padded = encoded + "=" * (-len(encoded) % 4)
+    try:
+        raw = base64.b64decode(padded, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if len(raw) > max_decoded:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if CONTROL_RE.search(text):
+        return None
+    return text
+
+
+def valid_app(value):
+    """The spec's app grammar: [A-Za-z0-9_.+-]{1,32}."""
+    return bool(re.fullmatch(r"[A-Za-z0-9_.+-]{1,32}", value or ""))
+
+
+def safe_agent(value, fallback="agent"):
+    """An agent id: plain characters only, and short."""
+    value = re.sub(r"[^A-Za-z0-9._-]", "_", str(value or ""))
+    value = re.sub(r"^[^A-Za-z0-9]+", "", value)
+    return (value or fallback)[:MAX_AGENT]
+
+
+def session_token(value, budget):
+    """A plain token for a protocol id, with a digest that is always there.
+
+    The digest is ALWAYS appended: sanitising maps a `/` to a `_` and a long
+    id is cut short, so a token alone is not unique. Worse, a lossy token can
+    be spelled out by hand — `a_b-1a2b3c4d` is a legal id — and it would
+    then name the file of `a/b`, so one program could delete the record of
+    another. With the digest always there, two different ids never share a
+    file.
+    """
+    token = re.sub(r"[^A-Za-z0-9._-]", "_", str(value or ""))
+    digest = hashlib.blake2b(str(value).encode("utf-8", "replace"),
+                             digest_size=8).hexdigest()
+    suffix = "-" + digest
+    room = budget - len(suffix)
+    if room < 1:
+        room = 1
+    return token[:room] + suffix
+
+
+def valid_id(value):
+    """The spec's id grammar: 263 characters in all, 32 per level, 8 levels."""
+    if not value or len(value) > MAX_ID_LEN:
+        return False
+    return bool(ID_RE.fullmatch(value))
+
+
+def project_name(cwd):
+    """The project of a working directory: its last component."""
+    trimmed = (cwd or "").rstrip("/")
+    if not trimmed:
+        return ""
+    return trimmed.rsplit("/", 1)[-1]
+
+
+def tmux_socket(value):
+    """A tmux socket is an absolute path of plain segments.
+
+    The socket is passed to tmux as data, but a traversal path would still
+    select an arbitrary socket, so it is dropped rather than stored.
+    """
+    if not re.fullmatch(r"/[A-Za-z0-9._/-]{1,255}", value or ""):
+        return ""
+    if any(part in ("", ".", "..") for part in value.split("/")[1:]):
+        return ""
+    return value
+
+
+def environment_panes():
+    """The multiplexer panes of this terminal.
+
+    tmux injects TMUX_PANE and TMUX into every pane; both are read only when
+    the pane id has the shape tmux writes, so a stray environment cannot put
+    an arbitrary value into a record.
+    """
+    herdr = ""
+    if os.environ.get("HERDR_ENV") == "1":
+        candidate = os.environ.get("HERDR_PANE_ID", "")
+        if re.fullmatch(r"[A-Za-z0-9:_.-]{0,64}", candidate):
+            herdr = candidate
+    pane = ""
+    socket = ""
+    candidate = os.environ.get("TMUX_PANE", "")
+    if re.fullmatch(r"%\d{1,6}", candidate):
+        pane = candidate
+        socket = tmux_socket(os.environ.get("TMUX", "").split(",", 1)[0])
+    return herdr, pane, socket
 
 
 # -------------------------------------------------------------- the tap
@@ -548,37 +833,41 @@ class Tap:
     record. The registry is per tap, so a program that reports several ids
     owns several records at once and each of them keeps its own lifetime.
 
-    The writer is never called while a report is read. A report is queued,
-    the queue is coalesced per record file (two reports for the same file
-    cost one call, the last one wins), and the queue is flushed in small
-    batches out of the relay loop. A burst of reports therefore costs a
-    bounded number of writer calls, and a slow writer costs the relay a
-    bounded time.
+    A report is written where it is read: the write is a small file and one
+    rename, so there is no writer process, no queue and no lock to hold. A
+    rate cap keeps a program that
+    reports in a burst from turning the tap into a file-system benchmark.
     """
 
-    def __init__(self, pid, report, agent="", session="", master_fd=None,
-                 token=None, window=""):
+    def __init__(self, pid, store, agent="", session="", master_fd=None,
+                 token=None, window="", cwd=None, herdr_pane=None,
+                 tmux_pane=None, tmux_socket_value=None):
         self.pid = pid
-        self.report = report
+        self.store = store
         self.agent = agent
         self.session = session
         self.master_fd = master_fd
         # A random token in every name: a pid can be reused, and a later tap
         # must not adopt — or delete — the records of an earlier one.
-        self.token = token or secrets.token_hex(4)
-        self.window = window
+        self.token = token or secrets.token_hex(8)
+        self.window = window if re.fullmatch(r"0x[0-9a-fA-F]{1,16}",
+                                             window or "") else ""
+        self.cwd = cwd if cwd is not None else safe_cwd()
         self.terminal_id = f"tap:{pid}:{self.token}"
         self.session_prefix = f"tap-{pid}-{self.token}"
         self.records = {}  # id -> {"state", "agent", "session", "record_id"}
         self.apps = {}  # id -> the app last seen for that id
         self.scanner = Scanner()
-        self.pending = {}  # (agent, session) -> the writer calls to make
-        self.pending_count = 0  # how many calls are queued
         self.order = 0  # the counter that says which record is the oldest
         self.probes = 0  # the feature queries answered so far
-        self.writers = []  # (Popen, start monotonic): calls in flight
-        self.tokens = WRITER_BURST
+        self.tokens = WRITE_BURST
         self.tokens_at = now()
+        self.warned = False
+        panes = environment_panes()
+        self.herdr_pane = panes[0] if herdr_pane is None else herdr_pane
+        self.tmux_pane = panes[1] if tmux_pane is None else tmux_pane
+        self.tmux_socket = panes[2] if tmux_socket_value is None \
+            else tmux_socket_value
         if master_fd is not None:
             # The master is not blocking: a child that never reads its stdin
             # fills the pty queue, and a blocking write there would freeze
@@ -603,8 +892,8 @@ class Tap:
         # whole, and it is not a feature query either.
         if len(body) > MAX_BODY:
             return
-        # A NUL cannot live in a shell variable: the writer's `read` drops it,
-        # so it would parse a different report than this one. Reject it whole.
+        # A NUL cannot live in a shell variable and cannot be part of a
+        # report: the whole sequence is dropped.
         if b"\x00" in body:
             return
         if body.strip(ASCII_WS_BYTES) == b"?":
@@ -632,21 +921,40 @@ class Tap:
         if state not in STATES:
             # No state at all, or a state the spec does not define.
             return
+        # The free text is all-or-nothing: a title or a message that does not
+        # decode, that decodes to a control character or that is over the
+        # spec's limit discards the whole report. Keeping the state and
+        # dropping only the text would publish a claim the program never made.
+        title = decode_text(pairs.get("title", ""), MAX_TITLE_ENC, MAX_TITLE_DEC)
+        if title is None:
+            return
+        message = decode_text(pairs.get("msg", ""), MAX_MSG_ENC, MAX_MSG_DEC)
+        if message is None:
+            return
+        # An unknown kind and a progress that is not an integer in 0..100 are
+        # absent: the spec says so, and they do not invalidate the rest of
+        # the report. A kind only means something for a blocked report.
+        kind = pairs.get("kind", "") if state == "blocked" else ""
+        if kind not in KINDS:
+            kind = ""
+        progress = -1
+        if state in ("working", "blocked"):
+            raw = pairs.get("progress", "")
+            if re.fullmatch(r"(?:0|[1-9][0-9]|100)", raw):
+                progress = int(raw)
         agent = self.resolve_agent(record_id, pairs.get("app", ""))
         session = self.resolve_session(record_id)
         previous = self.records.get(record_id)
         if previous is not None and previous["agent"] != agent:
             # The app of this id changed, so the record moves to another file
             # (the name of a record is agent + session): the old one is taken
-            # off the disk, or it would stay behind forever. A queued publish
-            # of the old file is dropped first, so it cannot flash back.
-            self.drop_report(previous["agent"], previous["session"])
+            # off the disk, or it would stay behind forever.
             self.remove(previous)
-        # The registry is bounded: the oldest record goes before the new one
-        # is filed.
-        self.make_room(record_id)
-        self.publish(body, agent, session, record_id, state)
-        self.remember(record_id, state, agent, session)
+        if self.publish(agent, session, record_id, state, title, message,
+                        kind, progress):
+            # Only a record that reached the disk may evict another one.
+            self.make_room(record_id)
+            self.remember(record_id, state, agent, session)
 
     def answer_probe(self):
         """Answer the feature query, as far as the pty allows.
@@ -705,15 +1013,15 @@ class Tap:
         The root record is named after the tap (`tap-<pid>-<token>`) and a
         child record after the tap and its id (`tap-<pid>-<token>-<safe id>`),
         so the records of one tap never collide. An explicit `--session`
-        overrides both: it names one file for the whole tap, which collapses
-        every id of this tap into a single record.
+        prefixes every name; the id digest still keeps each id in its own
+        file, so one id's exit removal cannot delete another id's record.
         """
         if self.session:
             # Namespace the explicit name by the tap token: the child controls
             # app=, and an un-namespaced `--session work` would let it claim
             # `app=claude` and overwrite claude~work. Keep the id digest too:
-            # collapsing every id onto one file loses a queued report and lets
-            # a live record's exit removal delete a settled one. Leave room for
+            # collapsing every id onto one file loses a report and lets a
+            # live record's exit removal delete a settled one. Leave room for
             # the digest and the separator so the name is never over 64.
             token_part = f"-{self.token}"
             keep = 64 - 18 - 1 - len(token_part)
@@ -743,82 +1051,52 @@ class Tap:
 
     # ----------------------------------------------------------- records
 
-    def publish(self, body, agent, session, record_id, state):
-        self.queue({"kind": "publish", "agent": agent, "session": session,
-                    "body": body, "record_id": record_id, "state": state})
+    def publish(self, agent, session, record_id, state, title, message,
+                kind, progress):
+        """Write the record of one id; the file is replaced, never appended.
+
+        The record holds the whole report: there is no merge with a previous
+        record, so a report without a title or a message writes an empty name
+        and an empty message rather than keeping the text of an older run.
+        Each report also refreshes `updatedAt`, which is the heartbeat the
+        reader's 120 s staleness clock needs.
+        """
+        if not self.allow_write():
+            return False
+        record = {
+            "schemaVersion": 2,
+            "agent": agent[:MAX_AGENT],
+            "sessionId": session[:MAX_SESSION],
+            "name": title[:MAX_NAME],
+            "cwd": self.cwd[:MAX_CWD],
+            "project": project_name(self.cwd)[:MAX_PROJECT],
+            "state": state,
+            "kind": kind,
+            "progress": progress,
+            "recordId": record_id[:MAX_ID_LEN],
+            "message": message[:MAX_MESSAGE],
+            "pid": self.pid,
+            "windowAddress": self.window,
+            "herdrPane": self.herdr_pane,
+            "tmuxPane": self.tmux_pane,
+            "tmuxSocket": self.tmux_socket,
+            "terminalId": self.terminal_id,
+            "updatedAt": int(time.time() * 1000),
+        }
+        if not self.store.write(record["agent"], record["sessionId"], record):
+            self.warn_once("cannot write a record")
+            return False
+        return True
 
     def remove(self, record):
         """Take a record off the disk, with the agent and session it had."""
-        self.queue({"kind": "remove", "agent": record["agent"],
-                    "session": record["session"], "body": b"",
-                    "record_id": record.get("record_id", "")})
-
-    def queue(self, op):
-        """Put a writer call in the queue.
-
-        The queue is keyed by the file the call writes, and every file keeps
-        at most one report and one removal, in the order they were made. Two
-        reports for the same file therefore cost one call — the last one
-        wins — while a report and the removal that follows it stay two calls,
-        because a record that is written and then taken away is not the same
-        as a record that was never written. The queue is bounded; the oldest
-        call is dropped when it is full, because the relay must never grow
-        without limit.
-        """
-        key = (op["agent"], op["session"])
-        ops = self.pending.get(key)
-        if not ops:
-            self.pending[key] = [op]
-            self.pending_count += 1
-            self.trim()
-            return
-        if ops[-1]["kind"] == op["kind"]:
-            # The same kind again: the newer call replaces the older one.
-            ops[-1] = op
-            return
-        ops.append(op)
-        self.pending_count += 1
-        for index, other in enumerate(ops[:-1]):
-            if other["kind"] == op["kind"]:
-                # The newer call of that kind decides: the older one is
-                # superseded and is dropped.
-                del ops[index]
-                self.pending_count -= 1
-                break
-        self.trim()
-
-    def trim(self):
-        """Keep the queue within its hard bound, in O(1) per dropped file.
-
-        A queue entry is a writer call; the oldest file is dropped as a whole
-        when either the call or the file bound is hit. Under a hostile flood
-        that may drop a removal, leaving a stale file for Service.qml's prune;
-        the alternative is unbounded memory and an O(n^2) trim, which is worse.
-        Normal traffic (one tap, tens of records) never reaches either bound.
-        """
-        while self.pending and (self.pending_count > MAX_PENDING
-                                or len(self.pending) > MAX_PENDING_KEYS):
-            key = next(iter(self.pending))
-            self.pending_count -= len(self.pending.pop(key))
-
-    def drop_report(self, agent, session):
-        """Forget the queued report of a file: the file is going away."""
-        key = (agent, session)
-        ops = self.pending.get(key)
-        if not ops:
-            return
-        kept = [op for op in ops if op["kind"] != "publish"]
-        self.pending_count -= len(ops) - len(kept)
-        if kept:
-            self.pending[key] = kept
-        else:
-            del self.pending[key]
+        self.store.remove(record["agent"], record["session"])
 
     def make_room(self, record_id):
         """Make room for a new record: the oldest one goes when the cap is hit.
 
-        The eviction happens before the new report is queued, so the report
-        that is dropped is the one of the record that goes away.
+        The eviction happens after the new report is written, so a report that
+        the rate cap refused does not evict a live record.
         """
         if record_id not in self.records and len(self.records) >= MAX_RECORDS:
             self.evict()
@@ -841,9 +1119,6 @@ class Tap:
         oldest = min(self.records, key=lambda key: self.records[key]["order"])
         record = self.records.pop(oldest)
         self.apps.pop(oldest, None)
-        # The queued report of that file is dropped and the file is removed,
-        # so it goes away instead of being written.
-        self.drop_report(record["agent"], record["session"])
         self.remove(record)
 
     def clear(self, record_id):
@@ -852,7 +1127,8 @@ class Tap:
         A clear without an id addresses the root and therefore removes every
         record of this tap. The records are removed with the agent and the
         session they were filed under, and their app entries go with them, so
-        a later report does not inherit an app of a record that is gone.
+        a later report does not inherit an app of a record that is gone. Only
+        the files of this tap are touched.
         """
         known = list(self.records)
         known += [key for key in self.apps if key not in self.records]
@@ -864,7 +1140,6 @@ class Tap:
         for key in doomed:
             record = self.records.pop(key, None)
             if record is not None:
-                self.drop_report(record["agent"], record["session"])
                 self.remove(record)
             self.apps.pop(key, None)
 
@@ -873,7 +1148,6 @@ class Tap:
         for key in [k for k, r in self.records.items() if r["state"] in LIVE]:
             record = self.records.pop(key)
             self.apps.pop(key, None)
-            self.drop_report(record["agent"], record["session"])
             self.remove(record)
 
     def close(self):
@@ -881,150 +1155,39 @@ class Tap:
 
         A `done` or an `error` survives — the user still has to see it — but
         a record that was still running, idle or in an unknown state belongs
-        to a process that no longer exists. The report of such a record is
-        dropped when it is still queued: the record is on its way out, so
-        there is no point in writing it first.
+        to a process that no longer exists.
         """
         for key in [k for k, r in self.records.items() if r["state"] not in SETTLED]:
             record = self.records.pop(key)
-            self.drop_report(record["agent"], record["session"])
+            self.apps.pop(key, None)
             self.remove(record)
 
-    # ------------------------------------------------------------ writer
+    # ------------------------------------------------------------- limits
 
-    def refill_tokens(self):
+    def allow_write(self):
+        """The rate cap: at most WRITE_RATE records a second, in bursts."""
         elapsed = max(0.0, now() - self.tokens_at)
-        self.tokens = min(WRITER_BURST, self.tokens + elapsed * WRITER_RATE)
+        self.tokens = min(WRITE_BURST, self.tokens + elapsed * WRITE_RATE)
         self.tokens_at = now()
+        if self.tokens < 1.0:
+            return False
+        self.tokens -= 1.0
+        return True
 
-    def flush(self, limit=FLUSH_BATCH, wait=False, deadline=None, rate=True):
-        """Start queued writer calls without blocking the relay.
-
-        At most `WRITER_INFLIGHT` subprocesses run at once and, unless the
-        caller is the exit path, a global token bucket caps the rate. The
-        relay only polls them. `wait=True` is for tests, where the result has
-        to be on disk before the assertion.
-        """
-        self.reap_writers()
-        if rate:
-            self.refill_tokens()
-            allowance = int(self.tokens)
-            if allowance <= 0:
-                return 0
-            if limit is None or allowance < limit:
-                limit = allowance
-        written = 0
-        while (self.pending and (limit is None or written < limit)
-               and len(self.writers) < WRITER_INFLIGHT):
-            key = next(iter(self.pending))
-            ops = self.pending[key]
-            op = ops.pop(0)
-            self.pending_count -= 1
-            if not ops:
-                del self.pending[key]
-            self.run(op)
-            written += 1
-        if rate:
-            self.tokens = max(0.0, self.tokens - written)
-        if wait:
-            if deadline is None:
-                deadline = now() + WRITER_TIMEOUT
-            self.wait_writers(deadline)
-        return written
-
-    def run(self, op):
-        """Start one writer call. The body is small enough for the pipe."""
-        argv = [self.report, "--agent", op["agent"], "--session", op["session"],
-                "--terminal-id", self.terminal_id]
-        if self.window:
-            argv += ["--window", self.window]
-        record_id = op.get("record_id") or ""
-        if record_id:
-            # The removal has to address the record it removes: the file
-            # name is not the protocol id, and a terminal that watches the
-            # wire would clear the wrong record.
-            argv += ["--record-id", record_id]
-        if op["kind"] == "publish":
-            # Pin the state the tap validated: the writer's shell parser must
-            # not be able to derive a different lifetime from the same bytes
-            # (NUL/Unicode whitespace were the divergence).
-            argv += ["--state", op["state"], "--osc-fd", "0"]
-            body = op["body"]
-        elif record_id:
-            argv += ["--remove"]
-            body = b""
-        else:
-            # The root record has no protocol id to put in a clear, and
-            # `--remove` would be suppressed as an unaddressable file. An
-            # explicit clear removes the file and addresses the terminal's
-            # root record.
-            argv += ["--state", "clear"]
-            body = b""
-        try:
-            proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                    start_new_session=True, env=safe_env())
-        except OSError:
+    def warn_once(self, message):
+        """Say it once: a broken store must not spam the terminal."""
+        if self.warned:
             return
-        try:
-            if body:
-                proc.stdin.write(body)
-            proc.stdin.close()
-        except (BrokenPipeError, OSError):
-            try:
-                proc.stdin.close()
-            except OSError:
-                pass
-        self.writers.append((proc, now()))
+        self.warned = True
+        print(f"muster-tap: {message}", file=sys.stderr)
 
-    def reap_writers(self):
-        """Reap finished writers and kill one that outstayed its timeout."""
-        keep = []
-        for proc, started in self.writers:
-            if proc.poll() is not None:
-                continue
-            if now() - started > WRITER_TIMEOUT:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
-            keep.append((proc, started))
-        self.writers = keep
 
-    def wait_writers(self, deadline):
-        """Wait for in-flight writers, killing whatever is left at the deadline."""
-        while self.writers and now() < deadline:
-            self.reap_writers()
-            if not self.writers:
-                return
-            time.sleep(0.01)
-        for proc, _started in self.writers:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-        for proc, _started in self.writers:
-            try:
-                proc.wait(timeout=0.2)
-            except (subprocess.TimeoutExpired, OSError):
-                pass
-        self.writers = []
-
-    def finish(self, deadline):
-        """Flush the remaining calls and wait, within the exit budget."""
-        while now() < deadline:
-            self.flush(limit=None, rate=False)
-            if not self.pending and not self.writers:
-                return
-            self.wait_writers(deadline)
-        self.wait_writers(now())
+def safe_cwd():
+    """The working directory of the tap, or "" when it cannot be read."""
+    try:
+        return os.getcwd()
+    except OSError:
+        return ""
 
 
 # --------------------------------------------------------------- terminal
@@ -1052,7 +1215,8 @@ def close_above_two():
 
     The wrapped program would otherwise keep a copy of the real terminal and
     could write to it behind the tap's back, which is exactly what the tap
-    exists to prevent.
+    exists to prevent. The descriptor of the sessions directory goes with
+    them: the child has no business writing records.
     """
     # /proc/self/fd lists only the descriptors that actually exist; closing
     # every number up to a 65k soft limit was 65k syscalls per tap start.
@@ -1100,9 +1264,12 @@ def reap(pid, grace=1.0):
         time.sleep(0.02)
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            os.kill(pid, sig)
+            os.killpg(pid, sig)
         except OSError:
-            pass
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
         try:
             waited, status = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
@@ -1120,9 +1287,10 @@ def reap(pid, grace=1.0):
 def detect_window():
     """The focused Hyprland window at tap start, or "".
 
-    Resolving it once here means the writer does not have to walk sixteen
-    ancestors and call hyprctl while holding its global lock for every new
-    record. A failure simply leaves the writer on `--window auto`.
+    Resolving it once here means the tap does not have to walk sixteen
+    ancestors and call hyprctl again for every new record. A failure simply
+    leaves the record without a window address. This is a query of the
+    compositor, not a writer: nothing is written anywhere.
     """
     try:
         result = subprocess.run(["hyprctl", "-j", "activewindow"],
@@ -1133,6 +1301,19 @@ def detect_window():
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return ""
     return address if re.fullmatch(r"0x[0-9a-fA-F]{1,16}", str(address)) else ""
+
+
+def safe_env():
+    """A fixed PATH for the compositor query the tap makes at start.
+
+    The child inherits the user's environment, but the tap must not be able
+    to run a `hyprctl` that a writable PATH directory planted. The Muster
+    tools live in /usr/bin on Omarchy.
+    """
+    env = dict(os.environ)
+    env["PATH"] = "/usr/bin:/bin"
+    env["LC_ALL"] = "C"
+    return env
 
 
 # ----------------------------------------------------------------- main
@@ -1174,17 +1355,26 @@ def main(argv):
     if session and not ID_SHAPE_RE.fullmatch(session):
         fail("--session must be an id: letters, digits, dot, dash, underscore (max 64)")
 
-    report = report_path()
-    if not os.access(report, os.X_OK):
-        fail(f"{report} is not executable; run muster-doctor")
+    # The store is opened before the child starts. A store that cannot be
+    # opened is a warning, not a failure: the tap still relays the bytes,
+    # it just does not record anything.
+    store = RecordStore()
+    try:
+        store.open()
+    except StoreError as error:
+        print(f"muster-tap: {error}; not recording", file=sys.stderr)
+        store.close()
+
+    # Resolve the window before the child starts: hyprctl is a synchronous
+    # read and must not delay a running child or the relay.
+    window = detect_window()
 
     pid, master = pty.fork()
     if pid == 0:  # child: the command on the pty
         try:
             close_above_two()
-            # Tell a Muster integration that the tap owns this session. The
-            # bundled pi bridge stands down on this flag; otherwise its JSON
-            # record and the tap's OSC record would be two cards.
+            # Mark the child as tap-owned. A Muster integration can stand
+            # down on this flag instead of writing a second record.
             os.environ["MUSTER_TAP"] = "1"
             os.execvp(command[0], command)
         except BaseException as error:  # noqa: BLE001 - the child cannot go on
@@ -1247,7 +1437,6 @@ def main(argv):
         pass
 
     saved_term = None
-    window = detect_window()
     tap = None
     output = None
     status = None
@@ -1261,11 +1450,10 @@ def main(argv):
                 tty.setraw(stdin_fd)
             except termios.error:
                 saved_term = None
-        tap = Tap(pid, report, agent=agent, session=session, master_fd=master,
+        tap = Tap(pid, store, agent=agent, session=session, master_fd=master,
                   window=window)
         output = Output(stdout_fd)
         watch_stdin = stdin_fd is not None
-        last_flush = now()
         while not stop[0]:
             # A child that exits while a grandchild keeps the pty open must
             # not keep the tap alive: the exit is noticed here, and the rest
@@ -1280,19 +1468,9 @@ def main(argv):
                 drain(master, output, tap)
                 break
 
-            # The writer is flushed in small batches, at most every
-            # FLUSH_INTERVAL. The clock moves on even when there is nothing
-            # to write, so the relay never spins.
-            tap.reap_writers()
-            if now() - last_flush >= FLUSH_INTERVAL:
-                if tap.pending:
-                    tap.flush()
-                last_flush = now()
-
-            timeout = max(0.0, FLUSH_INTERVAL - (now() - last_flush))
             watched = [master] + ([stdin_fd] if watch_stdin else [])
             try:
-                readable, _w, _x = select.select(watched, [], [], timeout)
+                readable, _w, _x = select.select(watched, [], [], RELAY_TIMEOUT)
             except InterruptedError:
                 continue
             except OSError:
@@ -1328,16 +1506,10 @@ def main(argv):
                 termios.tcsetattr(stdin_fd, termios.TCSAFLUSH, saved_term)
             except termios.error:
                 pass
-        # The child is gone: the records that are still running go with it,
-        # and whatever is still queued reaches the disk.
+        # The child is gone: the records that are still running go with it.
         try:
             if tap is not None:
                 tap.close()
-                # The last flush: the settled records have to reach the disk.
-                # The writer is asynchronous now, so this waits for the
-                # in-flight calls and starts the rest within the exit budget.
-                budget = min(6.0, max(FINAL_FLUSH, tap.pending_count * 0.05))
-                tap.finish(now() + budget)
         except Exception:  # noqa: BLE001 - cleanup must not raise
             pass
         try:
@@ -1346,10 +1518,11 @@ def main(argv):
             pass
         if output is not None:
             output.close()
+        store.close()
 
     if status is None:
-        status = reap(pid)
         child_alive[0] = False
+        status = reap(pid)
     if failure is not None:
         if isinstance(failure, KeyboardInterrupt):
             print("muster-tap: interrupted", file=sys.stderr)

@@ -189,7 +189,6 @@ BarWidget {
           terminalId: session.terminalId,
           folder: Model.folderLabel(session),
           pid: session.pid,
-          completedRuns: session.completedRuns,
           window: session.windowAddress,
           pane: session.herdrPane,
           tmux: session.tmuxPane

@@ -43,6 +43,41 @@ function eq(name, actual, expected) {
 
 const base = { agent: "pi", state: "working" }
 
+// ---------------------------------------------------------- normalizeRecord
+
+eq("normalizeRecord: path is carried through",
+  Model.normalizeRecord({ ...base }, "/state/muster/pi~s.json").path,
+  "/state/muster/pi~s.json")
+eq("normalizeRecord: not an object", Model.normalizeRecord(null, "/r.json"), null)
+eq("normalizeRecord: no agent", Model.normalizeRecord({ state: "working" }, "/r.json"), null)
+eq("normalizeRecord: protocol app spelling accepted",
+  Model.normalizeRecord({ app: "claude-code", state: "working" }, "/r.json").agent, "claude")
+eq("normalizeRecord: agent alias resolved",
+  Model.normalizeRecord({ ...base, agent: "oh-my-pi" }, "/r.json").agent, "omp")
+eq("normalizeRecord: unknown agent kept as a plain id",
+  Model.normalizeRecord({ ...base, agent: "My Agent" }, "/r.json").agent, "my-agent")
+eq("normalizeRecord: prototype names are not agents",
+  Model.normalizeRecord({ ...base, agent: "constructor" }, "/r.json").agent, "constructor")
+eq("normalizeRecord: state kept",
+  Model.normalizeRecord({ ...base, state: "blocked" }, "/r.json").state, "blocked")
+eq("normalizeRecord: unknown state normalised",
+  Model.normalizeRecord({ ...base, state: "sideways" }, "/r.json").state, "unknown")
+eq("normalizeRecord: missing state normalised",
+  Model.normalizeRecord({ agent: "pi" }, "/r.json").state, "unknown")
+eq("normalizeRecord: name wins over title",
+  Model.normalizeRecord({ ...base, name: "Build", title: "Other" }, "/r.json").name, "Build")
+eq("normalizeRecord: title is the protocol spelling of name",
+  Model.normalizeRecord({ ...base, title: "Other" }, "/r.json").name, "Other")
+eq("normalizeRecord: message wins over msg",
+  Model.normalizeRecord({ ...base, message: "one", msg: "two" }, "/r.json").message, "one")
+eq("normalizeRecord: msg is the protocol spelling of message",
+  Model.normalizeRecord({ ...base, msg: "two" }, "/r.json").message, "two")
+eq("normalizeRecord: project from cwd",
+  Model.normalizeRecord({ ...base, cwd: "/home/u/muster" }, "/r.json").project, "muster")
+eq("normalizeRecord: declared project wins over cwd",
+  Model.normalizeRecord({ ...base, cwd: "/home/u/muster", project: "Muster" }, "/r.json").project,
+  "Muster")
+
 // ------------------------------------------------------------- terminalId
 
 eq("terminalId: absent -> empty",
@@ -143,24 +178,59 @@ eq("isSettled: unknown", Model.isSettled("unknown"), false)
 // -------------------------------------------------------------- shouldAlert
 
 function sess(over) {
-  return Object.assign(Model.normalizeRecord(Object.assign({}, base, over), "/r.json"), over)
+  return Model.normalizeRecord(Object.assign({}, base, over), "/r.json")
 }
 
 eq("shouldAlert: no baseline", Model.shouldAlert(sess({}), null), false)
-eq("shouldAlert: completedRuns grew",
-  Model.shouldAlert(sess({ completedRuns: 2 }), { completedRuns: 1, state: "working" }), true)
-eq("shouldAlert: settled transition",
-  Model.shouldAlert(sess({ state: "done" }), { completedRuns: 1, state: "working" }), true)
-eq("shouldAlert: error transition",
-  Model.shouldAlert(sess({ state: "error" }), { completedRuns: 1, state: "blocked" }), true)
-eq("shouldAlert: already settled",
-  Model.shouldAlert(sess({ state: "done" }), { completedRuns: 1, state: "done" }), false)
+eq("shouldAlert: no baseline on a settled record",
+  Model.shouldAlert(sess({ state: "done" }), undefined), false)
+eq("shouldAlert: working -> done",
+  Model.shouldAlert(sess({ state: "done" }), { state: "working" }), true)
+eq("shouldAlert: blocked -> error",
+  Model.shouldAlert(sess({ state: "error" }), { state: "blocked" }), true)
+eq("shouldAlert: idle -> done",
+  Model.shouldAlert(sess({ state: "done" }), { state: "idle" }), true)
+eq("shouldAlert: already done",
+  Model.shouldAlert(sess({ state: "done" }), { state: "done" }), false)
+eq("shouldAlert: already error",
+  Model.shouldAlert(sess({ state: "error" }), { state: "error" }), false)
 eq("shouldAlert: still working",
-  Model.shouldAlert(sess({ state: "working" }), { completedRuns: 1, state: "working" }), false)
-eq("shouldAlert: settled then idle without a run",
-  Model.shouldAlert(sess({ state: "idle" }), { completedRuns: 1, state: "done" }), false)
-eq("shouldAlert: settled across an already-settled baseline",
-  Model.shouldAlert(sess({ state: "done", completedRuns: 1 }), { completedRuns: 1, state: "error" }), false)
+  Model.shouldAlert(sess({ state: "working" }), { state: "working" }), false)
+eq("shouldAlert: done -> idle (acknowledged)",
+  Model.shouldAlert(sess({ state: "idle" }), { state: "done" }), false)
+eq("shouldAlert: error -> done is not a new edge",
+  Model.shouldAlert(sess({ state: "done" }), { state: "error" }), false)
+eq("shouldAlert: unknown is not settled",
+  Model.shouldAlert(sess({ state: "unknown" }), { state: "working" }), false)
+
+// ------------------------------------------------- removed legacy fields
+
+for (const gone of ["lastPrompt", "completedRuns", "seq"]) {
+  check("normalizeRecord: " + gone + " is not carried",
+    !(gone in Model.normalizeRecord(Object.assign({}, base, { [gone]: 1 }), "/r.json")))
+}
+
+// ---------------------------------------------------------- focus fields
+
+eq("windowAddress: plain address kept",
+  Model.normalizeRecord({ ...base, windowAddress: "0x601dc3f347b0" }).windowAddress, "0x601dc3f347b0")
+eq("windowAddress: anything else dropped",
+  Model.normalizeRecord({ ...base, windowAddress: "0x1; rm -rf /" }).windowAddress, "")
+eq("herdrPane: plain id kept",
+  Model.normalizeRecord({ ...base, herdrPane: "pane-3" }).herdrPane, "pane-3")
+eq("herdrPane: shell source dropped",
+  Model.normalizeRecord({ ...base, herdrPane: "a; rm -rf /" }).herdrPane, "")
+eq("tmuxPane: %N kept",
+  Model.normalizeRecord({ ...base, tmuxPane: "%3" }).tmuxPane, "%3")
+eq("tmuxPane: not a pane id dropped",
+  Model.normalizeRecord({ ...base, tmuxPane: "3" }).tmuxPane, "")
+eq("tmuxSocket: absolute path kept",
+  Model.normalizeRecord({ ...base, tmuxSocket: "/tmp/tmux-1000/default" }).tmuxSocket,
+  "/tmp/tmux-1000/default")
+eq("tmuxSocket: relative path dropped",
+  Model.normalizeRecord({ ...base, tmuxSocket: "tmp/sock" }).tmuxSocket, "")
+eq("tmuxSocket: traversal dropped",
+  Model.normalizeRecord({ ...base, tmuxSocket: "/tmp/../etc/sock" }).tmuxSocket, "")
 
 // --------------------------------------------------------------- summarize
 

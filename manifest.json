@@ -21,13 +21,11 @@
     "defaultSection": "left",
     "defaults": {
       "soundEnabled": true,
-      "notifyEnabled": true,
-      "notifyContent": false
+      "notifyEnabled": true
     },
     "schema": [
       { "key": "soundEnabled", "type": "boolean", "label": "Play a sound when a run finishes", "defaultValue": true },
-      { "key": "notifyEnabled", "type": "boolean", "label": "Send a desktop notification when a run finishes", "defaultValue": true },
-      { "key": "notifyContent", "type": "boolean", "label": "Include the session title and last prompt (or project name) in notifications (visible to other local users via process arguments and the notification log)", "defaultValue": false }
+      { "key": "notifyEnabled", "type": "boolean", "label": "Send a desktop notification when a run finishes", "defaultValue": true }
     ]
   }
 }

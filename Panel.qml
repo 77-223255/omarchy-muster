@@ -286,17 +286,6 @@ Panel {
           color: card.needful ? root.urgentColor : root.accentColor
         }
       }
-
-      Text {
-        textFormat: Text.PlainText
-        width: parent.width
-        visible: card.session.lastPrompt !== ""
-        text: "› " + Model.truncate(card.session.lastPrompt, 140)
-        color: root.dimColor
-        font.family: root.contentFontFamily
-        font.pixelSize: Style.font.caption
-        elide: Text.ElideRight
-      }
     }
   }
 
@@ -415,7 +404,7 @@ Panel {
           Text {
             width: parent.width
             visible: root.sessions.length === 0
-            text: "No agent sessions.\nRecords are read from ~/.local/state/omarchy/muster/sessions/ — an agent appears here once its bridge or hook writes one."
+            text: "No agent sessions.\nRecords are read from ~/.local/state/omarchy/muster/sessions/ — an agent appears here once its record is written."
             textFormat: Text.PlainText
             color: root.dimColor
             font.family: root.contentFontFamily

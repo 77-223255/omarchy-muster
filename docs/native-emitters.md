@@ -8,9 +8,9 @@ Muster is a **bar consumer**, not a terminal. The protocol has **no read API**
 — the spec says it outright: "the only bytes a terminal writes back are the
 feature detection reply … and there is no way to read records". A terminal keeps
 the records; nobody else can ask it what is running. So a bar like Muster still
-needs either the pty (`bin/muster-tap`, which answers the probe itself and
-turns the reports it sees into records) or a hook. A terminal gaining OSC 7501
-support does not feed Muster.
+needs the pty: on this branch `bin/muster-tap` is the only writer — it answers
+the probe itself and turns the reports it sees into records. A terminal gaining
+OSC 7501 support does not feed Muster.
 
 ## Agents that emit the protocol
 
@@ -47,17 +47,21 @@ are not listed have no upstream evidence either way — check before assuming.
 
 ## What this means for Muster
 
-- **One source per session.** A native emitter and the Muster bridge both
-  writing the same run means two records for one session. The pi bridge
-  therefore writes only its JSON record by default; its own OSC 7501 emission
-  is opt-in (`MUSTER_EMIT_OSC=1`) and is meant for pi older than 1.1.0.
-- **The tap is the bridge between the two.** `bin/muster-tap` answers
+- **One writer per session.** On this branch there is exactly one writer:
+  `bin/muster-tap`. It turns the reports it sees on the pty into records, and
+  nothing else writes a record — no report script, no agent bridge, no hook.
+  Two writers for one session would mean two records for one run.
+- **The tap is the bridge to the agent.** `bin/muster-tap` answers
   `OSC 7501;?` itself, so an agent that waits for the terminal's answer
   reports even under Ghostty 1.3.1 — or inside tmux or Herdr, where the
   sequence would otherwise be dropped before it reaches the terminal.
 - **The terminal's own UI is not Muster's source of truth.** A terminal that
   understands the protocol shows the session in its own way; the bar reads
   records, always.
+- **A probe-gated emitter needs the tap.** Under a terminal that does not
+  answer, Claude Code and pi report nothing at all — so an agent that is
+  missing from the bar is usually a terminal problem, not a Muster problem.
+  Run it under the tap and the probe is answered for it.
 
 [spec]: https://www.superlogical.com/rex/docs/build/program-status
 [post]: https://mitchellh.com/writing/program-status-osc7501

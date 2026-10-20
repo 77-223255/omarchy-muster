@@ -15,13 +15,13 @@ var MAX_RECORD_BYTES = 65536
 //
 // A program reports its own state as a list of key=value pairs on its pty; a
 // consumer keeps one record per id and applies the spec's lifetime rules. The
-// plugin consumes the same vocabulary through bin/muster-report (a hook writes
-// the pairs) and bin/muster-tap (a pty filter reads the escape sequence), and
+// plugin consumes the same vocabulary through bin/muster-tap (a pty filter
+// reads the escape sequence), which is the only writer in this branch, and
 // stores it as one JSON object per session. The JSON keys are the protocol
 // keys where they exist — state, kind, progress, id, and the free-text keys
 // the spec base64s on the wire (msg -> message, title -> name, app -> agent) —
 // plus the fields the spec deliberately leaves to the consumer: pid,
-// windowAddress, herdrPane, updatedAt, completedRuns, seq.
+// windowAddress, herdrPane, tmuxPane, tmuxSocket, terminalId, updatedAt.
 //
 //   state     idle | working | done | blocked | error
 //   kind      permission | question | auth      (blocked only)
@@ -159,8 +159,8 @@ function safeAgentLabel(session) {
 
 // Display and identifier text from a record is stripped of control characters
 // and bidi overrides: a record is untrusted input, and a newline or a U+202E in
-// a project name forges card text, tooltips and the doctor's report. No path or
-// prompt needs those bytes.
+// a project name forges card text, tooltips and the doctor's report. No path
+// or label needs those bytes.
 function printable(value, cap) {
   return asText(value)
     .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g, "")
@@ -189,8 +189,8 @@ function toNumber(value, fallback) {
 // for records that cannot be trusted (no agent, wrong type). Every string is
 // bounded here: a record is untrusted input, and one field of 64 KiB must not
 // become a 64 KiB label, a filename or a notification argument. The caps match
-// the writers (bin/muster-report, pi/muster.ts) so a well-written record is
-// never shortened.
+// the tap writer's field limits; the notification label is shortened further
+// in safeAgentLabel().
 function normalizeRecord(raw, path) {
   if (!raw || typeof raw !== "object") return null
   // Protocol `app` is the stable program name; muster's `agent` is the same
@@ -233,8 +233,8 @@ function normalizeRecord(raw, path) {
   var cwd = printable(raw.cwd, 1024)
   var declared = printable(raw.project, 256)
   var project = declared !== "" ? declared : projectFromCwd(cwd)
-  var name = printable(raw.name !== undefined ? raw.name : raw.title, 80).trim()
-  var message = printable(raw.message !== undefined ? raw.message : raw.msg, 240)
+  var name = printable(raw.name !== undefined ? raw.name : raw.title, 192).trim()
+  var message = printable(raw.message !== undefined ? raw.message : raw.msg, 2048)
 
   return {
     path: asText(path),
@@ -258,7 +258,6 @@ function normalizeRecord(raw, path) {
     recordId: recordId,
     terminalId: terminalId,
     message: message,
-    lastPrompt: printable(raw.lastPrompt, 240),
     pid: toNumber(raw.pid, 0),
     // Only a plain window address or pane id can ever reach a command line, so
     // a record cannot smuggle anything into the focus command.
@@ -273,9 +272,7 @@ function normalizeRecord(raw, path) {
       ? asText(raw.tmuxPane) : "",
     tmuxSocket: /^\/(?!\.\.(?:\/|$))[A-Za-z0-9._-]+(?:\/(?!\.\.(?:\/|$))[A-Za-z0-9._-]+)*$/.test(asText(raw.tmuxSocket))
       && asText(raw.tmuxSocket).length <= 256 ? asText(raw.tmuxSocket) : "",
-    updatedAt: toNumber(raw.updatedAt, 0),
-    completedRuns: toNumber(raw.completedRuns, 0),
-    seq: toNumber(raw.seq, 0)
+    updatedAt: toNumber(raw.updatedAt, 0)
   }
 }
 
@@ -331,13 +328,14 @@ function summarize(sessions) {
   return out
 }
 
-// The alert fires when a run finishes. Two signals, either is enough: the
-// completedRuns counter grew (survives a scan that missed a fast transition),
-// or the session just settled into done/error (survives a writer that only
-// reports states, such as a plain OSC 7501 emitter).
+// The alert fires when a run finishes, which the protocol shows as the state
+// edge into done or error: the record was working (or blocked) and is now
+// settled. There is no completion counter in the protocol, so this edge is
+// the only signal here. A record that is first seen already settled has no
+// edge; Service may recover a run that settled after it started by checking
+// the record's updatedAt, which is a consumer rule, not this predicate.
 function shouldAlert(session, before) {
   if (!before) return false
-  if (session.completedRuns > (before.completedRuns || 0)) return true
   return isSettled(session.state) && !isSettled(before.state)
 }
 
@@ -367,24 +365,7 @@ function kindLabel(kind) {
   return ""
 }
 
-// ------------------------------------------------------------------ text
-
-function truncate(text, limit) {
-  var value = asText(text).replace(/\s+/g, " ").trim()
-  if (value.length <= limit) return value
-  // QML's JS engine has no String.prototype.trimEnd (ES2019), so drop the
-  // trailing space with a regex instead. Short text returns above and never
-  // reached this line, which is why only long prompts broke the panel card
-  // and the notification body.
-  var cut = value.slice(0, Math.max(0, limit - 1)).replace(/\s+$/, "")
-  // Never keep half of a surrogate pair: a lone surrogate renders as a
-  // replacement box in Qt.
-  if (cut.length > 0) {
-    var last = cut.charCodeAt(cut.length - 1)
-    if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1)
-  }
-  return cut + "…"
-}
+// ----------------------------------------------------------------- paths
 
 function stateBase(xdgStateHome, home) {
   var base = String(xdgStateHome || "")
@@ -394,7 +375,7 @@ function stateBase(xdgStateHome, home) {
   // anything that is not absolute falls back to the home default.
   if (base === "" || base.charAt(0) !== "/") {
     // The home fallback is checked the same way: with no absolute home there is
-    // no safe place for a file that holds a prompt, and a relative one would be
+    // no safe place for a file that holds a record, and a relative one would be
     // resolved against the shell's cwd by every reader below. This stays
     // non-writable on purpose — it must fail loudly, never fall back to a
     // shared directory such as /tmp, and never be scanned relative to a cwd.

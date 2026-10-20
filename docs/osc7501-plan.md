@@ -1,97 +1,85 @@
-# OSC 7501 integration plan
+# OSC 7501 — the protocol-only branch
 
-Status: working plan for the `osc7501` branch after merging `main` (2026-10-19).
+Status: a short note on what this branch **is**, and on what was taken out of
+it. The plan that produced the branch is over; this is the shape that survived
+it.
 
-## Goal
+## The state lane
 
-Make Muster the Omarchy bar's OSC 7501 consumer. The terminal may ignore the
-protocol; `bin/muster-tap` sits in the pty path, answers the feature probe, and
-turns native reports into Muster records. The JSON record stays Muster's
-internal contract, so a 0.x spec cannot break the UI.
+There is exactly one path from an agent to the bar:
 
-Non-goals for this pass: a full terminal model (256-record cap, RIS/DECSTR,
-alternate screen, arbitrary hierarchy), and replacing hooks for every agent.
+```
+agent ──OSC 7501 on its pty──▶ bin/muster-tap ──one JSON record──▶ sessions/ ──▶ the bar
+```
 
-## Roles
+- the **agent** is a native emitter — it writes the protocol sequence to its
+  terminal itself (Claude Code, pi, Codex, Crush, omp; see
+  [`native-emitters.md`](native-emitters.md));
+- the **tap** is a pty filter: it runs the agent on a pseudo-terminal, answers
+  the protocol's feature probe so a probe-gated agent reports even under a
+  terminal that does not answer, and writes one JSON record per report;
+- the **record** is the bar's input: one small file per session under
+  `$XDG_STATE_HOME/omarchy/muster/sessions/`, read by the omarchy service;
+- the **bar** shows it and fires the alert on the state edge into `done` or
+  `error`.
 
-- **native emitter**: Claude Code (probe-gated), pi (probe-gated or
-  `PI_PROGRAM_STATUS=1`), Codex (unconditional on a tty), Crush, omp.
-- **tap**: wraps an agent on a pty, answers `OSC 7501;?`, forwards bytes
-  unchanged, writes records.
-- **hook / `muster-report`**: fallback for agents with no native support and
-  for fields OSC does not carry (prompt, session name, window/pane).
-- **bar**: reads records; never reads another process's terminal.
+Nothing else touches the state. The bar never reads a terminal, never talks
+to an agent, and never guesses.
 
-Protocol records belong to the terminal and are not readable by a third party
-(the spec has no read API). A bar therefore needs tap or a hook; a terminal
-gaining OSC 7501 support does not feed Muster.
+## What was taken out
 
-## Interface contract
+The branch used to have three writers and an enrichment lane. All of it is
+gone:
 
-Records gain an optional `terminalId` (a stable id for the pty/tap instance):
+| Removed | Why |
+|---|---|
+| `bin/muster-report` (a Bash writer driven by `jq` and `flock`) | a second writer for the same record; the tap writes the record itself, in Python, with the standard library only |
+| `pi/muster.ts` (a pi extension that wrote a record and could emit OSC) | a third writer, and a second way for the same session to appear twice |
+| hooks (`--prompt-fd`, `--state`, `--remove`, …) | the enrichment lane; see below |
+| the record's `lastPrompt`, `completedRuns`, `seq` | the protocol carries no prompt and no run counter, so these were guesses dressed as fields |
+| the `notifyContent` setting | a toast with a prompt in it would put the prompt on a command line and in a log file |
+| `--emit-osc` (writing the sequence back to the terminal) | with one writer there is nothing to mirror |
 
-- CLI: `muster-report --terminal-id <id>`; env `MUSTER_TERMINAL_ID` as fallback.
-- Shape: `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`; empty means absent.
-- `bin/muster-tap` uses `tap:<pid>:<random token>` and session names
-  `tap-<pid>-<token>-...`; it caps its registry at 64 and sets `MUSTER_TAP=1`
-  so the bundled pi bridge stands down.
-- `Model.normalizeRecord` exposes `terminalId`.
-- `Service.rebuild` keys a session by the record file path. `pid`, `updatedAt`,
-  `seq` and `terminalId` are self-asserted, so they must not be the identity;
-  path keying also lets one tap own several records.
-- Record file names stay `agent~session.json`; a tap's `session` is
-  `tap-<pid>-<token>` for the root record and
-  `tap-<pid>-<token>-<safe id>-<digest>` for a child.
-- `recordId` stays the protocol `id` and is display/grouping data only; it never
-  names a file or reaches a command line.
+The alert trigger moved with them: there is no counter to compare any more, so
+a finished run is the **state edge** into `done`/`error`.
 
-## Protocol corrections (from spec rev 0.4)
+## Why
 
-- A report without `state` is ignored; do not default to `working` when reading
-  an `--osc-fd` body.
-- A report is discarded **whole** on bad base64, a decoded control character,
-  or a limit breach. Do not keep `state` while dropping only `title`/`msg`.
-- Unknown `kind` is absent; non-integer/out-of-range `progress` is absent. They
-  must not fail the whole report.
-- Trim whitespace around keys/values; do not remove whitespace inside a value.
-  A pair whose value has a byte outside the wire charset is skipped.
-- Limits: whole sequence 4096; key 16; `app` 32; `id` 263 total (8 x 32 + 7),
-  32 per segment, 8 levels; `title` 256 encoded / 192 decoded; `msg` 2732
-  encoded / 2048 decoded.
-- `clear` removes the addressed record and every record beneath it; root clear
-  removes every record for that terminal.
-- `working`/`blocked` die on process exit and on a new shell prompt (OSC 133 A);
-  `done`/`error` survive both. No heartbeat is required by the spec.
+This branch is an exploration of one question: *what does the bar look like
+when the state comes from the protocol alone?* The answer is a much smaller
+plugin:
 
-## Workstreams
+- **one writer** — one file that owns the record contract, in one language,
+  with no shell pipeline and no lock file to audit;
+- **no enrichment** — nothing in the record that the protocol did not
+  actually say. A card that shows the agent, the folder, the state and the
+  protocol's own `msg` is honest; a card that also shows a prompt the
+  protocol never carried is a guess;
+- **fewer surfaces** — no hook to install, no extension to link, no
+  `MUSTER_*` switches to remember. You run an agent under `muster-tap`, and
+  that is the whole contract.
 
-1. `bin/muster-tap` (receiver): probe reply with `states`/`kinds`, per-tap
-   record registry, `app` inheritance, root/child clear, all live records
-   removed on child exit, OSC 133 A, stable session keys, `terminalId`.
-2. `bin/muster-report` (writer): `terminalId`, whole-report validation, unknown
-   kind/progress tolerance, `--remove` emits `clear`, spec limits.
-3. `Model.js` / `Service.qml` / `Panel.qml` / `BarWidget.qml`: `terminalId` and
-   multi-record keys, `recordId` display fallback, `progress`/`kind` gating.
-4. `pi/muster.ts` + docs: pi native emission means the bridge must not double
-   emit by default; document the tap-vs-bridge matrix and the terminal gap.
-5. Tests: fixtures from real Claude/pi sequences and Kitty/Ghostty parser tests.
+The cost is the obvious one: an agent that does not speak OSC 7501 is not a
+session here, and a card has no prompt; a name appears only if the program
+sends `title`. That is the trade
+this branch makes on purpose.
 
-## File ownership (parallel work)
+## If the prompt or the name comes back
 
-- A: `bin/muster-tap`, `tests/test_tap.py`.
-- B: `bin/muster-report`, `bin/muster-doctor`, `tests/test_report.py`.
-- C: `Model.js`, `Service.qml`, `Panel.qml`, `BarWidget.qml`,
-  `tests/test_model.js`.
-- D: `pi/muster.ts`, `README.md`, `README.zh.md`, `docs/osc7501.md`,
-  `manifest.json`, `tests/test_pi.md` (or none).
+The protocol is not the only possible source of a prompt or a session name —
+an agent's own hook, its API or its transcript has them. If that is ever
+wanted again, it should come back as a **separate lane** that writes into the
+same record, and it must not become a second protocol writer:
 
-No worker commits or checks out; the chef reviews and commits.
+- the lane would be opt-in per agent, and the tap's `MUSTER_TAP=1` flag would
+  let it stand down for a session the tap already owns;
+- the record would gain back exactly the fields the lane can justify
+  (`lastPrompt`, maybe a `name`), and nothing else;
+- the alert trigger would stay the state edge, so a lane that misses a run
+  cannot double it;
+- the notification would stay content-free, because omarchy's notification path
+  takes the text as argv and persists it.
 
-## Verification
-
-- `bash -n`, `shellcheck`, `python3 -m py_compile`, `node --check`.
-- `tests/test_*` under a temp `XDG_STATE_HOME`.
-- `qmllint` for syntax (warnings may be pre-existing).
-- One end-to-end synthetic tap: working -> blocked(kind) -> done, a second id,
-  then `clear`; assert one record per id and correct lifetimes.
-- A real pi run under tap (native), and a real Claude Code run where possible.
+In other words: the enrichment lane returns as an *addition* to the record
+contract, never as a second writer and never as a second way to be "the
+writer".

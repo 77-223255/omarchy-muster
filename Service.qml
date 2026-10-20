@@ -13,10 +13,9 @@ import "Model.js" as Model
 // notification fire here, once, which is why this is not part of the widget:
 // a bar surface exists per monitor.
 //
-// Records are files. Any agent integration may write one JSON object per
-// session into the sessions directory — the bundled pi bridge, the
-// muster-report helper, a future hook. This service discovers, watches,
-// and reacts to them; it never guesses a state from anything else.
+// Records are files. bin/muster-tap writes one JSON object per session into
+// the sessions directory. This service discovers, watches, and reacts to
+// them; it never guesses a state from anything else.
 Item {
   id: root
   visible: false
@@ -171,10 +170,6 @@ Item {
   // tune by editing a line. Change them here if you must.
   readonly property bool soundEnabled: setting("soundEnabled", true) === true
   readonly property bool notifyEnabled: setting("notifyEnabled", true) === true
-  // Off by default: the content toast puts the session title and last prompt
-  // through omarchy-notification-send's argv and its persisted log (mode 0644),
-  // where another local user can read them from /proc/<pid>/cmdline.
-  readonly property bool notifyContentEnabled: setting("notifyContent", false) === true
 
   readonly property int refreshIntervalSec: 2    // fallback rescan cadence; inotifywait makes new records instant
   readonly property int staleAfterSec: 120       // forget a live record whose writer stopped (heartbeat is 30s)
@@ -187,8 +182,15 @@ Item {
   // ------------------------------------------------------------ discovery
 
   property var recordPaths: []
+  // The last state seen for each record path, so a run finishing is visible as
+  // the edge into done/error. The protocol carries no completion counter.
   property var _seen: ({})
   property var _pathSeen: ({})
+  // Records that appear settled after this service started are a run that
+  // finished while we were watching but a scan missed the working edge. This
+  // replaces the old completedRuns counter without adding a field to the
+  // protocol record.
+  readonly property real _startedAt: Date.now()
   // Paths whose settled (done/error) state the user has already looked at by
   // focusing the session. The protocol leaves "stop showing a finished record"
   // to the consumer; this is that acknowledgement, held in memory only.
@@ -263,7 +265,7 @@ Item {
   }
 
   // Creates and vets the two directories the plugin owns, one level at a time.
-  // Session records hold the last user prompt and the working directory, so the
+  // Session records hold the agent's state and the working directory, so the
   // sessions directory must stay owner-only, and every component this plugin
   // creates under the state home must be a real directory owned by this user.
   // mkdir, chmod and every later open follow a symlinked component, so a
@@ -322,7 +324,7 @@ Item {
     "  step \"$1\" || return 1",
     "}",
     "walk_to sessions || exit 1",
-    "# The records hold prompts and stay owner-only; the marks next to them are",
+    "# The records hold session state and stay owner-only; the marks next to them are",
     "# generated SVGs with no session data and stay readable.",
     "chmod 700 . 2>/dev/null || true",
     "[ \"$(stat -c %a . 2>/dev/null)\" = 700 ] || echo \"muster: the records directory is not owner-only; records may be readable by other users\" >&2",
@@ -363,6 +365,12 @@ Item {
     "# The vetted directory's identity, so the service can notice a later swap or",
     "# recreation and restart its inotify watch instead of watching a dead inode.",
     "printf '#dir %s\\n' \"$(stat -c '%d:%i' . 2>/dev/null)\"",
+    "# Done/error records are kept for a week; a tap killed with SIGKILL can",
+    "# leave a staging file, which is cleared after an hour. Running this in the",
+    "# scan (not only at shell start) keeps a long-lived shell from accumulating",
+    "# both.",
+    "find -- . -maxdepth 1 -type f -name '*.json' -mtime +7 -delete 2>/dev/null || true",
+    "find -- . -maxdepth 1 -type f -name '.muster.*' -mmin +60 -delete 2>/dev/null || true",
     "find -- . -maxdepth 1 -type f -name '*.json' ! -name $'*\\n*' -printf '%T@\\t%s\\t%f\\n' 2>/dev/null | sort -k1,1nr | head -n 256"
   ].join("\n")
 
@@ -563,7 +571,7 @@ Item {
       return (root._pathSeen[a] || 0) - (root._pathSeen[b] || 0)
     })
     merged = knownPaths.concat(merged)
-    while (merged.length > 512) merged.shift()
+    if (merged.length > 512) merged = merged.slice(merged.length - 512)
     seen = ({})
     for (var m = 0; m < merged.length; m++) seen[merged[m]] = true
     for (var key in root._pathSeen) {
@@ -641,6 +649,11 @@ Item {
 
   function scheduleReload(path: string): void {
     if (path === "" || root._reloadQueue[path] === true) return
+    // Only a record the scan has already accepted is re-read here. A new
+    // file mounts its own Record and reads once; letting arbitrary *.json
+    // names into this queue would let a writer starve the real reloads.
+    if (root._pathSeen[path] === undefined) return
+    if (root._reloadQueued >= 128) return
     root._reloadQueue[path] = true
     root._reloadQueued += 1
     if (!reloadTimer.running) reloadTimer.start()
@@ -675,7 +688,7 @@ Item {
   function rebuild() {
     var now = Date.now()
     // One card per record file. The file path is the identity the service
-    // actually observes; `pid`, `updatedAt`, `seq` and `terminalId` are all
+    // actually observes; `pid`, `updatedAt` and `terminalId` are all
     // self-asserted by the writer. Keying by pid used to let a forged record
     // with a victim's pid replace the victim's card; a forged record can
     // still add a card, but it cannot evict a different file's card.
@@ -718,8 +731,8 @@ Item {
     for (var i = 0; i < list.length; i++) {
       var session = list[i]
       parts.push(JSON.stringify([session.path, session.agent, session.state,
-        session.kind, session.progress, session.completedRuns, session.updatedAt,
-        session.name, session.message, session.lastPrompt, session.cwd, session.project,
+        session.kind, session.progress, session.updatedAt,
+        session.name, session.message, session.cwd, session.project,
         session.recordId, session.terminalId, session.windowAddress, session.herdrPane,
         session.tmuxPane, session.tmuxSocket, session.pid]))
     }
@@ -733,17 +746,21 @@ Item {
   readonly property int alertBurstLimit: 10
   readonly property int alertBurstWindowMs: 60000
 
-  // A record counts as "finished a run" when its completedRuns counter grows.
-  // Comparing counters instead of states survives a scan interval that missed
-  // a fast working→idle flip.
+  // A run finishing is the state edge into done/error: the record was working
+  // (or blocked) and is now settled. The protocol has no completion counter,
+  // so the previous state of each record is what a finished run looks like.
   function detectCompletions(list, now) {
     var previous = root._seen
     var next = {}
     for (var i = 0; i < list.length; i++) {
       var session = list[i]
       var before = previous[session.path]
-      next[session.path] = { completedRuns: session.completedRuns, state: session.state }
-      if (!before) continue
+      next[session.path] = { state: session.state }
+      if (!before) {
+        if (Model.isSettled(session.state) && session.updatedAt >= root._startedAt)
+          root.fireAlert(session, now)
+        continue
+      }
       if (Model.shouldAlert(session, before)) root.fireAlert(session, now)
     }
     root._seen = next
@@ -751,7 +768,7 @@ Item {
 
   function fireAlert(session, now) {
     // The debounce collapses sessions that finish together; the rolling cap
-    // stops a same-UID writer that keeps growing a record's completedRuns from
+    // stops a same-UID writer that settles a record over and over from
     // turning the alert into a sustained notification and sound stream.
     if (now - root._lastAlertAt < root.debounceMs) return
     var recent = []
@@ -826,11 +843,12 @@ Item {
     if (argv) Quickshell.execDetached(argv)
   }
 
-  // The completion toast. It deliberately carries no session content: omarchy's
-  // notification service takes the summary and body as process arguments
-  // (omarchy-notification-send -> busctl) and then persists them under
-  // ~/.local/state/omarchy/notifications/, so a prompt placed here would be
-  // readable by other local users from /proc/<pid>/cmdline and kept on disk.
+  // The completion toast. It carries no session content: only the agent's
+  // label and a fixed word for the state. omarchy's notification service takes
+  // the summary and body as process arguments (omarchy-notification-send ->
+  // busctl) and then persists them under ~/.local/state/omarchy/notifications/,
+  // so anything a record carries would be readable by other local users from
+  // /proc/<pid>/cmdline and kept on disk.
   //
   // The agent id is the one record field that does reach that path, so it is
   // bounded and stripped in one place (Model.safeAgentLabel): a record is
@@ -847,14 +865,9 @@ Item {
     if (isTest === true) {
       subject = "Muster  ·  test"
       body = "Test alert"
-    } else if (root.notifyContentEnabled) {
-      subject = "Muster  ·  " + session.title
-      body = session.lastPrompt !== "" ? Model.truncate(session.lastPrompt, 180)
-        : (session.project !== "" ? session.project : "finished")
     } else {
       subject = "Muster  ·  " + who.label
-      body = session.state === "blocked" ? "Needs your input"
-        : (session.state === "error" ? "Run failed" : "Run finished")
+      body = session.state === "error" ? "Run failed" : "Run finished"
     }
     // omarchy-notification-send only treats a dash-leading description as text
     // when it is not one of its option flags. A body that is exactly `--image=…`
@@ -880,11 +893,6 @@ Item {
     return args
   }
 
-  // The content variant is the `notifyContent` setting (see manifest.json and
-  // setting() above), not a commented-out copy pasted over this function. It
-  // stays off by default for the reason given above; enabling it is an explicit
-  // choice instead of a source edit that could be lost on update.
-
   // Right-clicking a panel card, the chip's middle click, and the `test` IPC
   // all land here, so the alert path can be checked without waiting for a real
   // run to finish. The notification is marked as a test so it cannot be
@@ -905,7 +913,6 @@ Item {
         title: "Muster",
         agent: "pi",
         agentIcon: String.fromCodePoint(0xe901),
-        lastPrompt: "Test alert",
         cwd: "",
         windowAddress: ""
       })

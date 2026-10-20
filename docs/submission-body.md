@@ -16,62 +16,62 @@ _No response_
 
 ### Maintainer notes
 
-No build step, no package manager, and no network access at runtime: the plugin
-is four QML files, one JavaScript helper, two shell scripts and one optional
-agent plugin. The shell side uses `bash`, `find`, `sort`, `head`, `stat`, `dd`,
-`mkdir`, `chmod` and `timeout`, plus `inotifywait` when it is
-installed; the
-record writer `bin/muster-report` uses `jq`, `flock`, `dd`, `stat`, `mv`,
-`chmod`, `tr`, `cut`, `date`, `wc`, `awk`, `cat`, `head`, `od`, `sed`, `base64`, `sha1sum` and `rm`; focusing a session uses
-`hyprctl` and, inside a multiplexer, `herdr` or `tmux`; alerts use `paplay` and
-`omarchy-notification-send`. The optional pty receiver `bin/muster-tap` is
-Python 3 (standard library only). All of them are common desktop tools, and the
-plugin has no build step and no package of its own.
+**This listing is for the protocol-only branch, and it is a deliberately narrow
+plugin.** Muster shows live coding-agent sessions in the Omarchy bar, with a
+completion sound and a desktop notification. The state comes from the
+[Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)
+(OSC 7501) — the terminal-native way for a program to report
+`idle`/`working`/`done`/`blocked`/`error` — and this branch has exactly one
+writer: `bin/muster-tap` runs an agent on a pty, forwards every byte unchanged,
+answers the protocol's feature probe itself, and writes the JSON record the bar
+reads. There is no report script, no agent bridge and no hook: an agent that
+does not speak the protocol is not a session here, and a card carries no prompt
+and a session name only when the program sends `title` (pi's native messages are
+`msg`, so often there is none). The record contract,
+the writer and the UI are still in motion on this branch.
 
-State comes from the Program Status Protocol (OSC 7501) — the terminal-native
-way for a program to report `idle`/`working`/`done`/`blocked`/`error` — carried
-as one small JSON record per session under
-`~/.local/state/omarchy/muster/sessions/`. An agent either writes the record
-with `bin/muster-report`, or emits the protocol sequence on its pty and
-`bin/muster-tap` turns it into the same record; either way the plugin never
-scrapes window titles or scans processes. The bundled pi bridge (`pi/muster.ts`)
-is optional and only affects pi; any other agent can be wired with the one-line
-`bin/muster-report` call documented in the README. Removing the plugin leaves
-the state directory, the pi bridge symlink (if it was linked) and omarchy's own
-notification log behind; the removal steps in the README cover each.
+No build step, no package manager, and no network access at runtime. The
+dependencies are:
 
-The records are owner-only (`0700`/`0600`), and `bin/muster-report` reads the
-prompt, the blocked detail, the session name, the working directory and an
-OSC 7501 body from
-file descriptors (`--prompt-fd`, `--message-fd`, `--name-fd`, `--cwd-fd`,
-`--osc-fd`), not
-command-line arguments, so that text never reaches a process's argv; every
-option that does reach a command line is limited to digits or a plain id
-charset. A base64 value that does not decode, or that decodes to a control
-character, is dropped whole. It refuses a sessions path that is not a real
-directory owned by the
-user, locks that directory read-only rather than through a predictable lock
-file, and addresses each record through that locked descriptor. Both bundled
-writers publish with an atomic rename from a staging file created exclusively
-and unpredictably (`O_EXCL` on a random name for both writers — the script's
-`dd conv=excl`, the bridge's `writeFileSync` with the `wx` flag), so a same-user
-writer cannot redirect a write through a planted symlink or hardlink. Fields
-are capped and the merged record is measured before it is published, and
-`--pid` is validated as numeric before it reaches bash arithmetic. The shell
-service enters and re-checks each directory component before it creates or
-prunes anything; the readers re-check every path they open (regular file, not a
-symlink, within the 64 KiB cap). The
-completion toast is content-free by default — the agent and a fixed state word,
-never the prompt. The version that does show the prompt is kept commented in
-`Service.qml` and documented as opt-in, because omarchy's notification path
-takes the text as argv and then persists it (upstream `basecamp/omarchy#8209`,
-fix `#8259` pending). The content toast returns once that path is private.
+- the bar side is QML (four QML files and one JavaScript helper) and runs
+  inside the omarchy shell (Quickshell, Qt 6). It shells out to `bash`,
+  `find`, `sort`, `head`, `stat`, `dd`, `mkdir`, `chmod`, `timeout`, `od` and
+  `tr`, plus `inotifywait` when it is installed (optional — it only makes a
+  new record appear at once instead of on the next scan);
+- `bin/muster-tap` is Python 3, standard library only (`pty`, `termios`,
+  `select`, `fcntl`, `struct`, `json`, `base64`, `hashlib`, `secrets`). It
+  writes the records itself: a staging file, an `fsync` and an atomic rename,
+  through a directory descriptor that is opened once with `O_NOFOLLOW`. There is
+  no `jq`, no `flock`, no lock file, no shell pipeline and no writer process
+  anywhere in the plugin;
+- focusing a session uses `hyprctl`, and inside a multiplexer, `herdr` or
+  `tmux`;
+- alerts use `paplay` and `omarchy-notification-send`.
+
+All of them are common desktop tools, and the plugin has no build step and no
+package of its own. `bin/muster-doctor` checks every one of them and the state
+directory, and exits non-zero when a required one is missing.
+
+The records are owner-only (`0700`/`0600`), the sessions directory is refused
+when it is a symlink, is not a directory or is not owned by the user, and the
+writer publishes each record through a directory descriptor it holds, so a
+same-user process that renames the directory or plants a symlink cannot
+redirect a write. The reader treats a record as untrusted: it refuses a
+symlink, a special file and anything over 64 KiB. The completion toast is
+content-free — the agent's label and a fixed state word, never a prompt or a
+message — because omarchy's notification path takes the text as argv and then
+persists it (upstream `basecamp/omarchy#8209`, fix `#8259` pending).
 
 The bar marks are omarchy's own agent glyphs, copied from
 `setup.default.agent.*` in
 `/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc` (eight codepoints in
 `/usr/share/fonts/omarchy/omarchy.ttf`, five in the Nerd Font), so the plugin
 introduces no third-party assets.
+
+Removing the plugin leaves the state directory and omarchy's own notification
+log behind; the removal steps in the README cover each. The plugin does not
+overwrite user configuration: the only settings are a completion sound and a
+completion notification, both toggled in the panel.
 
 The listing name "Muster" was used by two earlier submissions that were both
 closed and never listed (`fernandomenolli/omarchy-muster`, `botmarchy-muster`).
