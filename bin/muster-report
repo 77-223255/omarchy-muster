@@ -335,15 +335,16 @@ fi
 # terminal emulator.
 
 resolve_window() {
-  local current="$1" stat chain=() i
+  local candidate="$1" stat chain=() i
+  [[ $candidate =~ ^[0-9]+$ ]] || return 0
   for ((i = 0; i < 16; i++)); do
     # Validate before any arithmetic: `(( ))` evaluates its input, so a
     # non-numeric value must never reach it.
-    [[ $current =~ ^[0-9]+$ && $current -gt 1 ]] || break
-    chain+=("$current")
-    stat=$(cat "/proc/$current/stat" 2>/dev/null) || break
-    current=$(awk '{print $2}' <<<"${stat##*)}")
-    [[ $current =~ ^[0-9]+$ ]] || break
+    [[ $candidate =~ ^[0-9]+$ && $candidate -gt 1 ]] || break
+    chain+=("$candidate")
+    stat=$(cat "/proc/$candidate/stat" 2>/dev/null) || break
+    candidate=$(awk '{print $2}' <<<"${stat##*)}")
+    [[ $candidate =~ ^[0-9]+$ ]] || break
   done
   (( ${#chain[@]} > 0 )) || return 0
   local clients
@@ -357,10 +358,10 @@ resolve_window() {
     matches=$(jq -c --argjson pid "$pid" '[.[] | select(.pid == $pid)]' <<<"$clients" 2>/dev/null)
     count=$(jq 'length' <<<"${matches:-[]}" 2>/dev/null)
     [[ $count =~ ^[0-9]+$ ]] || count=0
-    ((count > 0)) && break
+    [ "$count" -gt 0 ] && break
     matches=""
   done
-  if ((count == 0)); then
+  if [ "$count" -eq 0 ]; then
     # A multiplexer pane runs under its own daemon, so no ancestor owns a
     # window: herdr panes are parented to the herdr server, and a tmux pane to
     # the tmux server, whose own client terminal may be gone. The prompt was
@@ -370,7 +371,7 @@ resolve_window() {
     return 0
   fi
 
-  if ((count == 1)); then
+  if [ "$count" -eq 1 ]; then
     jq -r '.[0].address' <<<"$matches"
     return 0
   fi

@@ -151,7 +151,15 @@ def fresh_writer_state():
 def test_static_tools():
     shellcheck = shutil.which("shellcheck")
     if shellcheck:
-        result = run([shellcheck, "-x", "-S", "style"] + sorted(str(p) for p in BIN.iterdir() if p.is_file()))
+        shell_files = []
+        for path in BIN.iterdir():
+            if not path.is_file():
+                continue
+            with path.open("rb") as handle:
+                first = handle.readline()
+            if b"python" not in first and (b"bash" in first or b"/sh" in first):
+                shell_files.append(str(path))
+        result = run([shellcheck, "-x", "-S", "style"] + sorted(shell_files))
         check("static: shellcheck clean", result.returncode == 0,
               {"stderr": result.stderr.decode("utf-8", "replace")[:2000]})
     else:
@@ -220,6 +228,17 @@ def test_static_tools():
             check(f"static: {path.name} Text block is PlainText",
                   "textFormat: Text.PlainText" in block,
                   {"snippet": block[:400]})
+
+    playbook = Path(os.environ.get(
+        "MUSTER_SECURITY_PLAYBOOK",
+        str(Path.home() / "Projects" / "agent-security-playbook")))
+    rule = playbook / "rules" / "semgrep-security.yaml"
+    if semgrep and rule.is_file():
+        result = run([semgrep, "scan", "--config", str(rule), "--quiet",
+                      "--error", "."], timeout=180)
+        check("static: playbook custom semgrep clean", result.returncode == 0,
+              {"stdout": result.stdout.decode("utf-8", "replace")[-4000:],
+               "stderr": result.stderr.decode("utf-8", "replace")[-2000:]})
 
     if REPORT.exists():
         report_text = REPORT.read_text(errors="replace")
@@ -683,8 +702,12 @@ def test_tap_security():
         os.symlink(target, base / "omarchy" / "muster" / "sessions")
         result = run([sys.executable, str(TAP), "--", "true"],
                      env=report_env(base), timeout=20)
-        check("tap: symlinked sessions directory refused", result.returncode != 0,
-              {"stderr": result.stderr.decode("utf-8", "replace")})
+        stderr = result.stderr.decode("utf-8", "replace")
+        check("tap: symlinked sessions directory is refused, relay continues",
+              result.returncode == 0 and "not recording" in stderr,
+              {"returncode": result.returncode, "stderr": stderr})
+        eq("tap: nothing is written through the symlinked sessions directory",
+           list(target.iterdir()), [])
 
 
 def test_model_unit_tests():

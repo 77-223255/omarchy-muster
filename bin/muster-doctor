@@ -23,9 +23,7 @@ state_dir="$state_base/omarchy/muster/sessions"
 marks_dir="$state_base/omarchy/muster/marks"
 pi_extension=$HOME/.pi/agent/extensions/muster.ts
 
-ok=0
-missing=0
-optional=0
+declare -i ok=0 missing=0 optional=0
 rows=()
 
 # Anything printed may derive from a record another integration wrote, so it is
@@ -52,9 +50,9 @@ record() {
   # pipe, which the JSON split below would otherwise truncate.
   rows+=("$1"$'\x1f'"$2"$'\x1f'"$(clean "$3")")
   case $1 in
-  ok) ok=$((ok + 1)) ;;
-  missing) missing=$((missing + 1)) ;;
-  *) optional=$((optional + 1)) ;;
+  ok) ok+=1 ;;
+  missing) missing+=1 ;;
+  *) optional+=1 ;;
   esac
 }
 
@@ -134,7 +132,7 @@ elif [[ -d $state_dir ]]; then
     record ok "sessions dir mode" "$dir_mode (owner-only)"
   fi
   open_records=$(find -- "$state_dir" -maxdepth 1 -name '*.json' -perm /077 2>/dev/null | wc -l)
-  if ((open_records > 0)); then
+  if [ "$open_records" -gt 0 ]; then
     record missing "record mode" "$open_records record(s) group/other-readable; run: chmod 600 $state_dir/*.json"
   else
     record ok "record mode" "records owner-only"
@@ -142,19 +140,19 @@ elif [[ -d $state_dir ]]; then
   # The reader refuses a symlink, a special file and an oversized record, so a
   # bad one is a silent missing session; surface it instead.
   bad_type=$(find -- "$state_dir" -maxdepth 1 -name '*.json' ! -type f 2>/dev/null | wc -l)
-  if ((bad_type > 0)); then
+  if [ "$bad_type" -gt 0 ]; then
     record missing "record type" "$bad_type record(s) are not plain files; the reader refuses them"
   else
     record ok "record type" "records are plain files"
   fi
   linked_records=$(find -- "$state_dir" -maxdepth 1 -name '*.json' -type l 2>/dev/null | wc -l)
-  if ((linked_records > 0)); then
+  if [ "$linked_records" -gt 0 ]; then
     record missing "record symlink" "$linked_records record(s) are symlinks; the reader refuses them"
   else
     record ok "record symlink" "no record is a symlink"
   fi
   oversized=$(find -- "$state_dir" -maxdepth 1 -name '*.json' -type f -size +64k 2>/dev/null | wc -l)
-  if ((oversized > 0)); then
+  if [ "$oversized" -gt 0 ]; then
     record missing "record size" "$oversized record(s) over 64 KiB; the reader refuses them"
   else
     record ok "record size" "records are within 64 KiB"
@@ -236,7 +234,7 @@ fi
 
 # ---------------------------------------------------------------- output
 
-if ((json)); then
+if [ "$json" -eq 1 ]; then
   printf '%s\n' "${rows[@]}" | jq -Rn '
     [inputs | split("\u001f") | {status: .[0], name: .[1], detail: .[2]}]
     | {ok: (map(select(.status == "ok")) | length),
@@ -255,4 +253,4 @@ else
   printf '\n  %d ok, %d missing, %d optional\n' "$ok" "$missing" "$optional"
 fi
 
-((missing == 0))
+[ "$missing" -eq 0 ]
