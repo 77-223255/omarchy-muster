@@ -229,6 +229,17 @@ def test_static_tools():
                   "textFormat: Text.PlainText" in block,
                   {"snippet": block[:400]})
 
+    playbook = Path(os.environ.get(
+        "MUSTER_SECURITY_PLAYBOOK",
+        str(Path.home() / "Projects" / "agent-security-playbook")))
+    rule = playbook / "rules" / "semgrep-security.yaml"
+    if semgrep and rule.is_file():
+        result = run([semgrep, "scan", "--config", str(rule), "--quiet",
+                      "--error", "."], timeout=180)
+        check("static: playbook custom semgrep clean", result.returncode == 0,
+              {"stdout": result.stdout.decode("utf-8", "replace")[-4000:],
+               "stderr": result.stderr.decode("utf-8", "replace")[-2000:]})
+
     if REPORT.exists():
         report_text = REPORT.read_text(errors="replace")
         lines = report_text.splitlines()

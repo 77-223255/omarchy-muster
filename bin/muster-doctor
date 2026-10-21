@@ -34,9 +34,7 @@ state_base=${XDG_STATE_HOME:-$HOME/.local/state}
 state_dir="$state_base/omarchy/muster/sessions"
 marks_dir="$state_base/omarchy/muster/marks"
 
-ok=0
-missing=0
-optional=0
+declare -i ok=0 missing=0 optional=0
 rows=()
 
 # Anything printed may derive from a record another integration wrote, so it
@@ -66,9 +64,9 @@ record() {
   # pipe, which the JSON split below would otherwise truncate.
   rows+=("$1"$'\x1f'"$2"$'\x1f'"$(clean "$3")")
   case $1 in
-  ok) ok=$((ok + 1)) ;;
-  missing) missing=$((missing + 1)) ;;
-  *) optional=$((optional + 1)) ;;
+  ok) ok+=1 ;;
+  missing) missing+=1 ;;
+  *) optional+=1 ;;
   esac
 }
 
@@ -270,7 +268,7 @@ elif [[ -d $state_dir ]]; then
   # A record is published with mode 0600 and the writer refuses anything else,
   # so a readable record is both a leak and a record the writer cannot replace.
   open_records=$(find -- "$state_dir" -maxdepth 1 -type f -name '*.json' ! -perm 600 -print 2>/dev/null | wc -l)
-  if ((open_records > 0)); then
+  if [ "$open_records" -gt 0 ]; then
     record missing "record mode" "$open_records record(s) are not 0600; run: chmod 600 $state_dir/*.json"
   else
     record ok "record mode" "records are 0600 (owner-only)"
@@ -279,19 +277,19 @@ elif [[ -d $state_dir ]]; then
   # The reader refuses a symlink, a special file and an oversized record, so a
   # bad one is a silent missing session; surface it instead.
   bad_type=$(find -- "$state_dir" -maxdepth 1 -name '*.json' ! -type f 2>/dev/null | wc -l)
-  if ((bad_type > 0)); then
+  if [ "$bad_type" -gt 0 ]; then
     record missing "record type" "$bad_type record(s) are not plain files; the reader refuses them"
   else
     record ok "record type" "records are plain files"
   fi
   linked_records=$(find -- "$state_dir" -maxdepth 1 -name '*.json' -type l 2>/dev/null | wc -l)
-  if ((linked_records > 0)); then
+  if [ "$linked_records" -gt 0 ]; then
     record missing "record symlink" "$linked_records record(s) are symlinks; the reader refuses them"
   else
     record ok "record symlink" "no record is a symlink"
   fi
   oversized=$(find -- "$state_dir" -maxdepth 1 -name '*.json' -type f -size +64k 2>/dev/null | wc -l)
-  if ((oversized > 0)); then
+  if [ "$oversized" -gt 0 ]; then
     record missing "record size" "$oversized record(s) over 64 KiB; the reader refuses them"
   else
     record ok "record size" "records are within 64 KiB"
@@ -325,16 +323,16 @@ json_escape() {
   printf '%s' "$s"
 }
 
-if ((json)); then
+if [ "$json" -eq 1 ]; then
   printf '{\n  "ok": %d,\n  "optional": %d,\n  "missing": %d,\n  "checks": [\n' \
     "$ok" "$optional" "$missing"
   total=${#rows[@]}
-  index=0
+  declare -i index=0
   for row in "${rows[@]}"; do
     IFS=$'\x1f' read -r status name detail <<<"$row"
-    index=$((index + 1))
+    index+=1
     comma=","
-    ((index == total)) && comma=""
+    [ "$index" -eq "$total" ] && comma=""
     printf '    {"status": "%s", "name": "%s", "detail": "%s"}%s\n' \
       "$(json_escape "$status")" "$(json_escape "$name")" "$(json_escape "$detail")" "$comma"
   done
@@ -351,4 +349,4 @@ else
   printf '\n  %d ok, %d missing, %d optional\n' "$ok" "$missing" "$optional"
 fi
 
-((missing == 0))
+[ "$missing" -eq 0 ]
