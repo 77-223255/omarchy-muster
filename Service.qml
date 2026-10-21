@@ -128,10 +128,13 @@ Item {
     "mark hermes omarchy E90A 60",
     "mark openclaw omarchy E90C 60",
     "mark cursor-agent omarchy E90D 60",
+    "mark ori omarchy E909 60",
+    "mark agy monospace F0AE2 54",
     "mark claude monospace F06C4 54",
     "mark copilot monospace F4B8 54",
     "mark crush monospace F02D1 54",
     "mark gemini monospace F0AE2 54",
+    "mark kimi monospace F06A9 54",
     "mark muse monospace F06E4 54"
   ].join("\n")
 

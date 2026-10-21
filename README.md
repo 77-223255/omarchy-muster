@@ -257,19 +257,23 @@ once.
 
 ## The agents omarchy ships
 
-All thirteen agents `omarchy default agent` accepts are known by name, plus the
-spellings an integration might use for them — `claude-code`, `oh-my-pi`,
-`open-code`, `cursor`, `github-copilot`, `gemini-cli`, `muse-code`, and a few
+Every agent `omarchy default agent` accepts (fifteen today) is known by name,
+plus the spellings an integration might use for them — `claude-code`,
+`oh-my-pi`, `open-code`, `cursor`, `cursor-cli`, `github-copilot`,
+`gemini-cli`, `antigravity`, `kimi-code`, `openrouter`, `muse-code`, and a few
 that only this plugin folds (`anthropic`, `openai-codex`, `pi-coding-agent`).
 A record written under any of them groups with the canonical agent instead of
-becoming a second one. The `also accepts` column below is the folding, not a
-claim about `omarchy default agent` itself, which takes a smaller set.
+becoming a second one. Gemini stays a distinct id for older integrations, even
+though the current default-agent list no longer offers it. The `also accepts`
+column below is the folding, not a claim about `omarchy default agent` itself,
+which takes a smaller set.
 
 The bar chip draws each agent with omarchy's own mark, taken from
 `setup.default.agent.*` in
-`/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc`: eight are brand glyphs
-in `/usr/share/fonts/omarchy/omarchy.ttf` (U+E901…U+E90D) and five are Nerd
-Font glyphs, exactly as omarchy's own menu draws them.
+`/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc`: nine are brand glyphs
+in `/usr/share/fonts/omarchy/omarchy.ttf` (U+E901…U+E90D) and seven are Nerd
+Font glyphs (the six current Omarchy agents plus Gemini), exactly as omarchy's
+own menu draws them.
 
 | id | shown as | also accepts |
 |----|----------|--------------|
@@ -280,12 +284,15 @@ Font glyphs, exactly as omarchy's own menu draws them.
 | `codex` | Codex | `openai-codex` |
 | `copilot` | Copilot | `github-copilot` |
 | `crush` | Crush | |
-| `cursor-agent` | Cursor | `cursor` |
+| `cursor-agent` | Cursor | `cursor`, `cursor-cli` |
 | `gemini` | Gemini | `gemini-cli` |
+| `agy` | Antigravity | `antigravity`, `google-antigravity` |
 | `grok` | Grok | |
 | `hermes` | Hermes | |
+| `kimi` | Kimi | `kimi-code` |
 | `muse` | Muse | `muse-code`, `musecode` |
 | `openclaw` | OpenClaw | |
+| `ori` | Ori | `openrouter` |
 
 Anything else works too and is shown under its own id (no mark until one is
 given). Adding an agent is one line in the `AGENTS` table at the top of

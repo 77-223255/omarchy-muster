@@ -23,10 +23,13 @@ var AGENTS = {
   hermes: { label: "Hermes", icon: 0xe90a, font: "omarchy" },
   openclaw: { label: "OpenClaw", icon: 0xe90c, font: "omarchy" },
   "cursor-agent": { label: "Cursor", icon: 0xe90d, font: "omarchy" },
+  ori: { label: "Ori", icon: 0xe909, font: "omarchy" },
+  agy: { label: "Antigravity", icon: 0xf0ae2, font: "" },
   claude: { label: "Claude", icon: 0xf06c4, font: "" },
   copilot: { label: "Copilot", icon: 0xf4b8, font: "" },
   crush: { label: "Crush", icon: 0xf02d1, font: "" },
   gemini: { label: "Gemini", icon: 0xf0ae2, font: "" },
+  kimi: { label: "Kimi", icon: 0xf06a9, font: "" },
   muse: { label: "Muse", icon: 0xf06e4, font: "" }
 }
 
@@ -42,7 +45,12 @@ var ALIASES = {
   "muse-code": "muse",
   musecode: "muse",
   cursor: "cursor-agent",
-  "pi-coding-agent": "pi"
+  "cursor-cli": "cursor-agent",
+  "pi-coding-agent": "pi",
+  antigravity: "agy",
+  "google-antigravity": "agy",
+  "kimi-code": "kimi",
+  openrouter: "ori"
 }
 
 // JSON.parse produces only strings, numbers, booleans, null, arrays and plain
