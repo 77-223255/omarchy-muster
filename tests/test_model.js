@@ -239,6 +239,8 @@ eq("herdrPane: plain id kept",
   Model.normalizeRecord({ ...base, herdrPane: "pane-3" }).herdrPane, "pane-3")
 eq("herdrPane: shell source dropped",
   Model.normalizeRecord({ ...base, herdrPane: "a; rm -rf /" }).herdrPane, "")
+eq("herdrPane: leading dash dropped",
+  Model.normalizeRecord({ ...base, herdrPane: "-rf" }).herdrPane, "")
 eq("tmuxPane: %N kept",
   Model.normalizeRecord({ ...base, tmuxPane: "%3" }).tmuxPane, "%3")
 eq("tmuxPane: not a pane id dropped",
@@ -250,6 +252,10 @@ eq("tmuxSocket: relative path dropped",
   Model.normalizeRecord({ ...base, tmuxSocket: "tmp/sock" }).tmuxSocket, "")
 eq("tmuxSocket: traversal dropped",
   Model.normalizeRecord({ ...base, tmuxSocket: "/tmp/../etc/sock" }).tmuxSocket, "")
+eq("tmuxSocket: dot segment dropped",
+  Model.normalizeRecord({ ...base, tmuxSocket: "/tmp/./sock" }).tmuxSocket, "")
+eq("tmuxSocket: empty segment dropped",
+  Model.normalizeRecord({ ...base, tmuxSocket: "/tmp//sock" }).tmuxSocket, "")
 
 // --------------------------------------------------------------- summarize
 

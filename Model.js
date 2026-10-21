@@ -193,6 +193,27 @@ function toNumber(value, fallback) {
   return fallback
 }
 
+// The focus command passes these two values to the multiplexers as data, but
+// only the shapes the multiplexers themselves write are accepted. A leading
+// dash is not a pane id and a `.`/`..` component is not a socket this plugin
+// should select; dropping the value keeps the click on its default target.
+function safeHerdrPane(value) {
+  var text = asText(value)
+  return /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}$/.test(text) ? text : ""
+}
+
+function safeTmuxSocket(value) {
+  var text = asText(value)
+  if (text.length === 0 || text.length > 256 || text.charAt(0) !== "/") return ""
+  var parts = text.slice(1).split("/")
+  for (var i = 0; i < parts.length; i++) {
+    var part = parts[i]
+    if (part === "" || part === "." || part === "..") return ""
+    if (!/^[A-Za-z0-9._-]+$/.test(part)) return ""
+  }
+  return text
+}
+
 // Turn one raw JSON record into the shape the UI binds against. Returns null
 // for records that cannot be trusted (no agent, wrong type). Every string is
 // bounded here: a record is untrusted input, and one field of 64 KiB must not
@@ -271,15 +292,13 @@ function normalizeRecord(raw, path) {
     // a record cannot smuggle anything into the focus command.
     windowAddress: /^0x[0-9a-fA-F]{1,16}$/.test(asText(raw.windowAddress))
       ? asText(raw.windowAddress) : "",
-    herdrPane: /^[A-Za-z0-9:_.-]{1,64}$/.test(asText(raw.herdrPane))
-      ? asText(raw.herdrPane) : "",
+    herdrPane: safeHerdrPane(raw.herdrPane),
     // A tmux pane id is '%' + digits; the socket is an absolute path. Both are
     // passed to the click command as positional data, never as shell source,
     // and a value that is not one of those shapes is dropped here too.
     tmuxPane: /^%[0-9]{1,6}$/.test(asText(raw.tmuxPane))
       ? asText(raw.tmuxPane) : "",
-    tmuxSocket: /^\/(?!\.\.(?:\/|$))[A-Za-z0-9._-]+(?:\/(?!\.\.(?:\/|$))[A-Za-z0-9._-]+)*$/.test(asText(raw.tmuxSocket))
-      && asText(raw.tmuxSocket).length <= 256 ? asText(raw.tmuxSocket) : "",
+    tmuxSocket: safeTmuxSocket(raw.tmuxSocket),
     updatedAt: toNumber(raw.updatedAt, 0)
   }
 }

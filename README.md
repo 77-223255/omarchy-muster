@@ -357,6 +357,16 @@ Probe-gated emitters stay silent under a terminal that does not answer the
 query — Ghostty 1.3.1, or tmux and Herdr, which drop the sequence. That is
 what the tap is for: it answers the query on the pane's behalf.
 
+## Security checks
+
+`python3 tests/security.py` runs the adversarial suite distilled from the
+[agent-security-playbook](https://github.com/77-223255/agent-security-playbook):
+shellcheck, semgrep, gitleaks and qmllint, then hostile umask and permission
+repair, symlink/FIFO/oversized records, argv and arithmetic injection, lock
+concurrency and timeout, a 10 000-file listing, and the exact QML read, setup
+and mark scripts. It uses temporary state homes and never touches the installed
+plugin's records.
+
 ## Dependencies
 
 No build step, no package manager, no network access. The language of the
@@ -402,6 +412,7 @@ does not speak the protocol is not a session, and there is no hook to install.
 | `Model.js` | record normalization, ordering, agent names and marks |
 | `bin/muster-tap` | the pty receiver and the only writer: OSC 7501 on the wire → records |
 | `bin/muster-doctor` | dependency and state check |
+| `tests/security.py` | adversarial security checks from the playbook |
 | `docs/osc7501.md` | how Muster speaks the Program Status Protocol |
 | `docs/osc7501-plan.md` | what this branch is, and what was taken out of it |
 | `docs/native-emitters.md` | who speaks OSC 7501 today, with versions and upstream evidence |
