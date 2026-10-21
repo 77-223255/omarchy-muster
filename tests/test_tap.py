@@ -28,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+from unittest import mock
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -84,7 +85,8 @@ class Harness:
     """A tap with a temporary state home; the records are read back from disk."""
 
     def __init__(self, agent="", session="", pid=4242, token=None,
-                 window="0x1234"):
+                 window="0x1234", herdr_pane="", tmux_pane="",
+                 tmux_socket_value=""):
         self.home = tempfile.mkdtemp(prefix="muster-tap-state-")
         self.previous = os.environ.get("XDG_STATE_HOME")
         os.environ["XDG_STATE_HOME"] = self.home
@@ -93,7 +95,9 @@ class Harness:
         self.master_r, self.master_w = os.pipe()
         self.tap = muster_tap.Tap(pid, self.store, agent=agent, session=session,
                                   master_fd=self.master_w, token=token,
-                                  window=window)
+                                  window=window, herdr_pane=herdr_pane,
+                                  tmux_pane=tmux_pane,
+                                  tmux_socket_value=tmux_socket_value)
         os.set_blocking(self.master_r, False)
 
     def close(self):
@@ -178,6 +182,48 @@ def test_probe_master_is_not_blocking():
         # to the query must not block on that: it is best effort.
         h.osc(b"?")
         eq("probe: the answer is written anyway", h.master_output(), PROBE_REPLY)
+
+
+# ------------------------------------------------------------ multiplexers
+
+def test_environment_panes_reads_herdr_and_tmux():
+    with mock.patch.dict(os.environ, {
+        "HERDR_ENV": "1",
+        "HERDR_PANE_ID": "w2:p7",
+        "TMUX_PANE": "%42",
+        "TMUX": "/tmp/tmux-1000/test,123,0",
+    }, clear=False):
+        eq("panes: herdr and tmux are picked up",
+           muster_tap.environment_panes(),
+           ("w2:p7", "%42", "/tmp/tmux-1000/test"))
+
+
+def test_environment_panes_rejects_stray_or_malformed_values():
+    with mock.patch.dict(os.environ, {
+        "HERDR_ENV": "0",
+        "HERDR_PANE_ID": "w2:p7",
+        "TMUX_PANE": "42",
+        "TMUX": "/tmp/../etc/socket,123,0",
+    }, clear=False):
+        eq("panes: a disabled herdr and malformed tmux are dropped",
+           muster_tap.environment_panes(), ("", "", ""))
+
+
+def test_environment_panes_without_a_multiplexer():
+    with mock.patch.dict(os.environ, {}, clear=True):
+        eq("panes: an absent environment is empty",
+           muster_tap.environment_panes(), ("", "", ""))
+
+
+def test_pane_fields_are_written_to_the_record():
+    with Harness(herdr_pane="w1:p6", tmux_pane="%3",
+                 tmux_socket_value="/tmp/tmux-1000/test") as h:
+        h.osc(b"state=working:app=claude")
+        record = list(h.records().values())[0]
+        eq("panes: the herdr pane is in the record", record["herdrPane"], "w1:p6")
+        eq("panes: the tmux pane is in the record", record["tmuxPane"], "%3")
+        eq("panes: the tmux socket is in the record", record["tmuxSocket"],
+           "/tmp/tmux-1000/test")
 
 
 # ------------------------------------------------------- a single record
