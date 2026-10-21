@@ -109,8 +109,8 @@ function agentMeta(agent) {
 }
 
 // The agent id is the only record field that reaches omarchy's notification
-// path, which takes the summary and the body as process arguments and then
-// persists them under ~/.local/state/omarchy/notifications/. So the label that
+// sender, which puts the summary and body on its command line, and the engine
+// keeps them under ~/.local/state/omarchy/notifications/. So the label that
 // goes there is bounded and stripped here, once, and an id that is not a plain
 // id yields no icon path at all. Everything else in a record stays in the
 // record.

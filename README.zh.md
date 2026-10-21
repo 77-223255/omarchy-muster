@@ -93,7 +93,10 @@ rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster"
 ```
 
 `omarchy plugin remove` 只做两件事:删插件目录、删 `~/.config/omarchy/shell.json`
-里的那条条目。如果你是上面那种"软链 checkout"的装法,改成删软链和你的 clone:
+里的那条条目。Omarchy 自己的通知状态在
+`~/.local/state/omarchy/notifications/`(`live.json`、`history.json`、
+`quiet.json`);想清掉 toast 历史和勿扰/稍后提醒状态就一起删。如果你是上面那种
+"软链 checkout"的装法,改成删软链和你的 clone:
 
 ```bash
 rm -f ~/.config/omarchy/plugins/shienze.muster
@@ -104,8 +107,9 @@ rm -rf ~/Projects/omarchy-muster
 覆盖用户配置(改设置只有你在面板里点)。state home 是 `$XDG_STATE_HOME`(默认
 `~/.local/state`),插件在其中创建 `omarchy/muster/sessions` 与 `omarchy/muster/marks`
 ——如果 `omarchy` 或 `~/.local/state` 还不存在也会一并创建。卸载插件不会删除这些状态,
-上面的卸载步骤会。(完成提醒还会让 omarchy 自己的通知服务弹一条 toast,而那个服务把
-自己的日志留在 `~/.local/state/omarchy/notifications/`;本插件不会把会话内容发过去。)
+上面的卸载步骤会。(完成提醒还会让 omarchy 自己的通知服务弹一条 toast,而那个服务的
+状态留在 `~/.local/state/omarchy/notifications/`;本插件不会把 prompt、消息、会话名
+或工作目录发过去,只发 agent 标签、一个固定的状态词,以及点击要用的窗口 id。)
 
 **隐私。** record 里包含最后一条用户 prompt 和工作目录。这些状态只留在本机,
 不会离开这台机器。`sessions/` 目录及其中的 record 都以仅属主可读的权限创建
@@ -136,12 +140,16 @@ record 由同一次打开独占创建并写入(`O_EXCL`)之后再原子改名—
 
 ## 通知内容
 
-提醒默认不带正文——只写 agent 和状态,不写 prompt——因为 omarchy 的通知链把文本当
-命令行参数传并持久化,放进提醒就会从 `/proc/<pid>/cmdline` 泄漏、也会留在磁盘上
-([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209),
-修复 [#8259](https://github.com/basecamp/omarchy/pull/8259) 待合并)。带正文的那版
-原样注释保留在 `Service.qml` 里;要启用就删掉安全的 `notificationCommand`、取消
-下面那块的注释,然后 `omarchy restart shell`。
+提醒默认不带正文——只写 agent 和状态,不写 prompt——因为文本仍会经过
+`omarchy-notification-send` 的命令行(可从 `/proc/<pid>/cmdline` 看到),
+通知引擎还会把 summary 和 body 存进 `~/.local/state/omarchy/notifications/`
+下的历史里;放进提醒就会被读到、也会留在磁盘上。带正文的版本是部件设置里的
+`notifyContent`(默认关闭,由 manifest schema 暴露),需要显式开启,不是隐藏的改代码。
+
+提醒把发送者标成 `Muster`,所以当前 Omarchy 通知引擎会按应用分组、应用勿扰和
+按来源的稍后提醒,并保留历史。(发送器默认的 `omarchy-action` 是留给 Omarchy
+自己的操作确认 toast 的:它会绕过勿扰,并在静音时被丢弃。)状态图标用 `--image`
+发送;新引擎的 `-i` 是主题图标名,不是文件路径。
 
 ## 用法
 

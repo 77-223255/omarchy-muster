@@ -172,8 +172,9 @@ Item {
   readonly property bool soundEnabled: setting("soundEnabled", true) === true
   readonly property bool notifyEnabled: setting("notifyEnabled", true) === true
   // Off by default: the content toast puts the session title and last prompt
-  // through omarchy-notification-send's argv and its persisted log (mode 0644),
-  // where another local user can read them from /proc/<pid>/cmdline.
+  // in omarchy-notification-send's argv (visible under /proc/<pid>/cmdline) and
+  // in the notification engine's on-disk history, so the text is exposed to
+  // anything that can read your processes or your state.
   readonly property bool notifyContentEnabled: setting("notifyContent", false) === true
 
   readonly property int refreshIntervalSec: 2    // fallback rescan cadence; inotifywait makes new records instant
@@ -685,19 +686,19 @@ Item {
     if (argv) Quickshell.execDetached(argv)
   }
 
-  // The completion toast. It deliberately carries no session content: omarchy's
-  // notification service takes the summary and body as process arguments
-  // (omarchy-notification-send -> busctl) and then persists them under
-  // ~/.local/state/omarchy/notifications/, so a prompt placed here would be
-  // readable by other local users from /proc/<pid>/cmdline and kept on disk.
+  // The completion toast. It deliberately carries no session content: the text
+  // goes through omarchy-notification-send's argv (visible under
+  // /proc/<pid>/cmdline) and the notification engine persists the summary and
+  // body in ~/.local/state/omarchy/notifications/history.json, so a prompt
+  // placed here would be visible in the sender's argv and kept on disk.
   //
   // The agent id is the one record field that does reach that path, so it is
   // bounded and stripped in one place (Model.safeAgentLabel): a record is
   // written by same-user code and its `agent` field is otherwise free text,
-  // which would put an arbitrary string — and an arbitrary path in the `-i`
-  // argument — into another service's argv and into its on-disk notification
-  // log. An id that is not a plain id falls back to a generic label and no
-  // icon.
+  // which would put an arbitrary string — and an arbitrary path in the
+  // `--image` argument — into another service's argv and into its on-disk
+  // notification history. An id that is not a plain id falls back to a generic
+  // label and no icon.
   function notificationCommand(session, isTest) {
     var who = Model.safeAgentLabel(session)
     // The word "test" is in the title, so a self-triggered alert cannot be
@@ -721,12 +722,20 @@ Item {
     // such a body a description; every other field here is already a constant
     // or a sanitised id that cannot start with a dash.
     if (body.charAt(0) === "-") body = " " + body
-    var args = ["omarchy-notification-send", "-u", "normal"]
+    // The rewritten Omarchy notification engine (Omapager) groups cards by
+    // app_name, applies Do Not Disturb and snoozes, and keeps history. The
+    // sender's default name, omarchy-action, is reserved for Omarchy's own
+    // confirmation toasts: it bypasses quiet and is dropped when silenced, so
+    // Muster names itself instead.
+    var args = ["omarchy-notification-send", "--app-name", "Muster", "-u", "normal"]
     var mark = String(session.agentIcon || "")
     if (mark !== "" && who.id !== "") {
       var state = session.state === "working" ? "-working"
         : (session.state === "blocked" ? "-blocked" : "")
-      args = args.concat(["-i", root.marksDir + "/" + who.id + state + ".svg"])
+      // The generated mark is an image, not a themed icon name: the engine's
+      // -i is a theme lookup, while --image is the standard image-path hint and
+      // the flag that accepts a local file.
+      args = args.concat(["--image", root.marksDir + "/" + who.id + state + ".svg"])
     }
     args = args.concat([subject, body])
     // Clicking the notification jumps to the terminal that produced it.

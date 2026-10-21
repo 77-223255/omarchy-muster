@@ -33,7 +33,8 @@ titles or scans processes. The bundled pi bridge (`pi/muster.ts`) is optional
 and only affects pi; any other agent can be wired with the one-line
 `bin/muster-report` call documented in the README. Removing the plugin leaves
 the state directory, the pi bridge symlink (if it was linked) and omarchy's own
-notification log behind; the removal steps in the README cover each.
+notification state (`live.json`, `history.json`, `quiet.json`) behind; the
+removal steps in the README cover each.
 
 The records are owner-only (`0700`/`0600`), and `bin/muster-report` reads the
 prompt, the blocked detail, the session name and the working directory from
@@ -53,10 +54,16 @@ service enters and re-checks each directory component before it creates or
 prunes anything; the readers re-check every path they open (regular file, not a
 symlink, within the 64 KiB cap). The
 completion toast is content-free by default — the agent and a fixed state word,
-never the prompt. The version that does show the prompt is kept commented in
-`Service.qml` and documented as opt-in, because omarchy's notification path
-takes the text as argv and then persists it (upstream `basecamp/omarchy#8209`,
-fix `#8259` pending). The content toast returns once that path is private.
+never the prompt. The content variant is an opt-in setting (`notifyContent`),
+not a source edit, because the text still travels on
+`omarchy-notification-send`'s argv and the notification engine persists the
+summary and body in its history. The sender now calls the D-Bus `Notify`
+method with typed parameters, so a dash-leading prompt cannot be read as an
+option, but that does not make the text private. The completion toast names
+its sender as `Muster`, so the current engine groups it, applies Do Not
+Disturb and snoozes, and keeps it in history; its state mark uses the standard
+`image-path` hint (`--image`), because the engine's `-i` is a themed icon name,
+not a file path.
 
 The bar marks are omarchy's own agent glyphs, copied from
 `setup.default.agent.*` in
