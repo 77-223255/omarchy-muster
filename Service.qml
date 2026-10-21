@@ -662,7 +662,7 @@ Item {
     // call ends in `|| true` because one surface being unavailable must not
     // stop the others.
     var steps = []
-    if (/^[A-Za-z0-9:_.-]{1,64}$/.test(String(herdrPane || "")))
+    if (Model.safeHerdrPane(herdrPane) !== "")
       steps.push('timeout 2 herdr agent focus -- "$2" >/dev/null 2>&1 || true')
     // `select-window`/`select-pane` set the session's active window and pane
     // (they work with no client attached); `switch-client -t %N` then moves an
@@ -671,7 +671,7 @@ Item {
     // one that can fail without a client — switch-client — goes last, after the
     // selects have already pointed the session at the pane.
     if (/^%[0-9]{1,6}$/.test(String(tmuxPane || ""))) {
-      var server = /^\/[A-Za-z0-9._\/-]{0,255}$/.test(String(tmuxSocket || "")) ? ' -S "$4"' : ""
+      var server = Model.safeTmuxSocket(String(tmuxSocket || "")) !== "" ? ' -S "$4"' : ""
       steps.push('timeout 2 tmux' + server + ' select-window -t "$3" \\; select-pane -t "$3" \\; switch-client -t "$3" >/dev/null 2>&1 || true')
     }
     if (/^0x[0-9a-fA-F]{1,16}$/.test(String(address || "")))

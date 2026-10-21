@@ -362,6 +362,16 @@ So state has to come from the agent itself: a hook where the agent has one
 (Claude's `Stop`, Codex's `notify`, pi's extension API), or a wrapper where it
 has not. Either way the sink is the same one-line call above.
 
+## Security checks
+
+`python3 tests/security.py` runs the adversarial suite distilled from the
+[agent-security-playbook](https://github.com/77-223255/agent-security-playbook):
+shellcheck, semgrep, gitleaks and qmllint, then hostile umask and permission
+repair, symlink/FIFO/oversized records, argv and arithmetic injection, lock
+concurrency and timeout, a 10 000-file listing, and the exact QML read, setup
+and mark scripts. It uses temporary state homes and never touches the installed
+plugin's records.
+
 ## Dependencies
 
 No build step, no package manager, no network access. The languages are the
@@ -410,6 +420,7 @@ its own small plugin, not here.
 | `pi/muster.ts` | pi → record bridge |
 | `bin/muster-report` | record writer for other agents |
 | `bin/muster-doctor` | dependency check |
+| `tests/security.py` | adversarial security checks from the playbook |
 | `assets/` | README screenshots |
 | `preview.png` | root listing card for the marketplace (optional) |
 | `docs/submission-body.md` | the exact issue body for a marketplace listing |

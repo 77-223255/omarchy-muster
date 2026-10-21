@@ -25,9 +25,10 @@
 #   # gone
 #   muster-report --agent claude --session "$ID" --remove
 #
-# `--agent` takes any id omarchy ships (pi, omp, opencode, claude, codex, crush,
-# grok, gemini, openclaw, hermes, copilot, muse, cursor-agent) plus their
-# aliases; an unknown id still works and gets the generic mark.
+# `--agent` takes any id omarchy ships (pi, omp, opencode, ori, claude, codex,
+# grok, openclaw, agy, hermes, copilot, crush, cursor-agent, muse, kimi, plus
+# the older gemini id) and their aliases; an unknown id still works and gets
+# the generic mark.
 
 set -euo pipefail
 
@@ -67,6 +68,23 @@ USAGE
 fail() {
   echo "muster-report: $*" >&2
   exit 1
+}
+
+# A tmux socket is an absolute path of plain segments. The value is passed to
+# tmux as data, but an empty, `.` or `..` segment would select a different
+# server than the record names, so it is dropped like any other bad hint.
+tmux_socket_ok() {
+  local path="$1" rest part
+  [[ $path == /* && ${#path} -le 256 ]] || return 1
+  rest="${path#/}"
+  [[ -n $rest ]] || return 1
+  while :; do
+    part="${rest%%/*}"
+    [[ -n $part && $part != . && $part != .. ]] || return 1
+    [[ $rest == */* ]] || break
+    rest="${rest#*/}"
+  done
+  return 0
 }
 
 agent=""
@@ -140,7 +158,7 @@ esac
 [[ $session =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] ||
   fail "--session must be an id: letters, digits, dot, dash, underscore (max 64)"
 [[ $state =~ ^[a-z]+$ ]] || fail "--state must be working, blocked, idle, or unknown"
-[[ $herdr_pane =~ ^[A-Za-z0-9:_.-]{0,64}$ ]] ||
+[[ -z $herdr_pane || $herdr_pane =~ ^[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}$ ]] ||
   fail "--herdr-pane must be a plain pane id of at most 64 characters"
 # A tmux pane id is always '%' + digits, but the field is absent outside tmux,
 # so empty is allowed and only a non-empty value must match. Unlike the pane,
@@ -150,7 +168,9 @@ esac
 # whole record.
 [[ -z $tmux_pane || $tmux_pane =~ ^%[0-9]{1,6}$ ]] ||
   fail "--tmux-pane must be empty or a pane id like %3"
-[[ -z $tmux_socket || $tmux_socket =~ ^/[A-Za-z0-9._/-]{0,255}$ ]] || tmux_socket=""
+if [[ -n $tmux_socket ]] && ! tmux_socket_ok "$tmux_socket"; then
+  tmux_socket=""
+fi
 # `--pid` reaches bash arithmetic in resolve_window, and arithmetic recursively
 # evaluates its input, so a non-numeric value is command execution:
 #   --pid 'i[$(id)]'  runs `id`
