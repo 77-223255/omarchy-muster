@@ -247,14 +247,17 @@ prompt 可以显示。
 
 ## omarchy 自带的 agent
 
-`omarchy default agent` 接受的 13 个 agent 全部按名字认识,同时也接受那条命令的
-别名:`claude-code`、`oh-my-pi`、`open-code`、`cursor`、`github-copilot`、
-`gemini-cli`、`muse-code` 等等。用别名写的记录会归并到规范 agent,不会变成第二个。
+`omarchy default agent` 现在接受的 15 个 agent 全部按名字认识,同时也接受集成可能
+使用的写法:`claude-code`、`oh-my-pi`、`open-code`、`cursor`、`cursor-cli`、
+`github-copilot`、`gemini-cli`、`antigravity`、`kimi-code`、`openrouter`、
+`muse-code` 等等。用这些写法写的记录会归并到规范 agent,不会变成第二个。Gemini 作为
+旧集成的独立 id 保留,尽管当前默认 agent 列表已经不再提供它。
 
 状态栏图标画的是 omarchy 自己的标记,取自
 `/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc` 里的
-`setup.default.agent.*`:8 个是 `/usr/share/fonts/omarchy/omarchy.ttf` 里的品牌
-字形(U+E901…U+E90D),5 个是 Nerd Font 字形 —— 和 omarchy 菜单用的完全一样。
+`setup.default.agent.*`:9 个是 `/usr/share/fonts/omarchy/omarchy.ttf` 里的品牌
+字形(U+E901…U+E90D),7 个是 Nerd Font 字形(6 个当前 Omarchy agent 加旧的 Gemini)
+—— 和 omarchy 菜单用的完全一样。
 
 | id | 面板显示 | 还接受 |
 |----|----------|--------------|
@@ -265,12 +268,15 @@ prompt 可以显示。
 | `codex` | Codex | `openai-codex` |
 | `copilot` | Copilot | `github-copilot` |
 | `crush` | Crush | |
-| `cursor-agent` | Cursor | `cursor` |
+| `cursor-agent` | Cursor | `cursor`、`cursor-cli` |
 | `gemini` | Gemini | `gemini-cli` |
+| `agy` | Antigravity | `antigravity`、`google-antigravity` |
 | `grok` | Grok | |
 | `hermes` | Hermes | |
+| `kimi` | Kimi | `kimi-code` |
 | `muse` | Muse | `muse-code`、`musecode` |
 | `openclaw` | OpenClaw | |
+| `ori` | Ori | `openrouter` |
 
 其它 id 也能用,只是以自己的 id 显示(没有标记,除非你给它一个)。加一个 agent
 就是在 `Model.js` 顶部的 `AGENTS` 表里加一行,填上 omarchy 给它的码点。

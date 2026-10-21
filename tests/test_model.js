@@ -54,6 +54,25 @@ eq("normalizeRecord: protocol app spelling accepted",
   Model.normalizeRecord({ app: "claude-code", state: "working" }, "/r.json").agent, "claude")
 eq("normalizeRecord: agent alias resolved",
   Model.normalizeRecord({ ...base, agent: "oh-my-pi" }, "/r.json").agent, "omp")
+eq("normalizeRecord: kimi-code alias resolved",
+  Model.normalizeRecord({ ...base, agent: "kimi-code" }, "/r.json").agent, "kimi")
+eq("normalizeRecord: kimi mark",
+  Model.normalizeRecord({ ...base, agent: "kimi" }, "/r.json").agentIcon,
+  String.fromCodePoint(0xf06a9))
+eq("normalizeRecord: openrouter alias resolved",
+  Model.normalizeRecord({ ...base, agent: "openrouter" }, "/r.json").agent, "ori")
+eq("normalizeRecord: ori brand mark",
+  Model.normalizeRecord({ ...base, agent: "ori" }, "/r.json").agentIcon,
+  String.fromCodePoint(0xe909))
+eq("normalizeRecord: ori uses the omarchy font",
+  Model.normalizeRecord({ ...base, agent: "ori" }, "/r.json").agentFont, "omarchy")
+eq("normalizeRecord: antigravity alias resolved",
+  Model.normalizeRecord({ ...base, agent: "antigravity" }, "/r.json").agent, "agy")
+eq("normalizeRecord: antigravity mark",
+  Model.normalizeRecord({ ...base, agent: "agy" }, "/r.json").agentIcon,
+  String.fromCodePoint(0xf0ae2))
+eq("normalizeRecord: cursor-cli alias resolved",
+  Model.normalizeRecord({ ...base, agent: "cursor-cli" }, "/r.json").agent, "cursor-agent")
 eq("normalizeRecord: unknown agent kept as a plain id",
   Model.normalizeRecord({ ...base, agent: "My Agent" }, "/r.json").agent, "my-agent")
 eq("normalizeRecord: prototype names are not agents",

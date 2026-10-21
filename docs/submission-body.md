@@ -68,8 +68,8 @@ because the engine's `-i` is a themed icon name, not a file path.
 
 The bar marks are omarchy's own agent glyphs, copied from
 `setup.default.agent.*` in
-`/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc` (eight codepoints in
-`/usr/share/fonts/omarchy/omarchy.ttf`, five in the Nerd Font), so the plugin
+`/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc` (nine codepoints in
+`/usr/share/fonts/omarchy/omarchy.ttf`, seven in the Nerd Font), so the plugin
 introduces no third-party assets.
 
 Removing the plugin leaves the state directory and omarchy's own notification
