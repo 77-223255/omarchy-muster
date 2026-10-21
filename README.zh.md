@@ -108,7 +108,10 @@ rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster"
 ```
 
 `omarchy plugin remove` 只做两件事:删插件目录、删 `~/.config/omarchy/shell.json`
-里的那条条目。如果你是上面那种"软链 checkout"的装法,改成删软链和你的 clone:
+里的那条条目。Omarchy 自己的通知状态在
+`~/.local/state/omarchy/notifications/`(`live.json`、`history.json`、
+`quiet.json`);想清掉 toast 历史和勿扰/稍后提醒状态就一起删。如果你是上面那种
+"软链 checkout"的装法,改成删软链和你的 clone:
 
 ```bash
 rm -f ~/.config/omarchy/plugins/shienze.muster
@@ -119,9 +122,9 @@ rm -rf ~/Projects/omarchy-muster
 覆盖用户配置(改设置只有你在面板里点)。state home 是 `$XDG_STATE_HOME`(默认
 `~/.local/state`),插件在其中创建 `omarchy/muster/sessions` 与 `omarchy/muster/marks`
 ——如果 `omarchy` 或 `~/.local/state` 还不存在也会一并创建。卸载插件不会删除这些状态,
-上面的卸载步骤会。(完成提醒还会让 omarchy 自己的通知服务弹一条 toast,而那个服务把
-自己的日志留在 `~/.local/state/omarchy/notifications/`;本插件不会把 prompt、消息
-或会话名发过去,只发 agent 标签、一个固定的状态词,以及点击要用的窗口 id。)
+上面的卸载步骤会。(完成提醒还会让 omarchy 自己的通知服务弹一条 toast,而那个服务的
+状态留在 `~/.local/state/omarchy/notifications/`;本插件不会把 prompt、消息、会话名
+或工作目录发过去,只发 agent 标签、一个固定的状态词,以及点击要用的窗口 id。)
 
 **隐私。** record 里带着工作目录、协议自己的 `title` 与 `msg`,以及会话所在终端和
 pane 的 id。这些状态只留在本机,不会离开这台机器。`sessions/` 目录及其中的 record
@@ -175,11 +178,16 @@ omarchy-shell shienze.muster status | jq '.details[]'
 两个都是面板里的开关,也都写在 manifest 里,omarchy 自己的设置界面也会列出它们。
 
 **通知不带正文**:只有 agent 的标签和一个固定的状态词("Run finished"、"Run
-failed"、"Needs your input"),永远不带 prompt 或消息。omarchy 的通知链把文本当
-命令行参数传并持久化,多写一点就会从 `/proc/<pid>/cmdline` 泄漏、也会留在磁盘上
-([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209),
-修复 [#8259](https://github.com/basecamp/omarchy/pull/8259) 待合并)。这个分支也
-没有能改这事的设置:本来就没有 prompt 可以显示。
+failed"、"Needs your input"),永远不带 prompt 或消息。文本仍会经过
+`omarchy-notification-send` 的命令行(可从 `/proc/<pid>/cmdline` 看到),
+通知引擎还会把 summary 和 body 存进 `~/.local/state/omarchy/notifications/`
+下的历史里,多写一点就会留在磁盘上。这个分支也没有能改这事的设置:本来就没有
+prompt 可以显示。
+
+提醒把发送者标成 `Muster`,所以当前 Omarchy 通知引擎会按应用分组、应用勿扰和
+按来源的稍后提醒,并保留历史。(发送器默认的 `omarchy-action` 是留给 Omarchy
+自己的操作确认 toast 的:它会绕过勿扰,并在静音时被丢弃。)状态图标用 `--image`
+发送;新引擎的 `-i` 是主题图标名,不是文件路径。
 
 其余参数**刻意写死在代码里** —— 一个因为某个歪设置而悄悄不响的部件,比一个需要
 改一行代码才能调的要糟得多。它们在 `Service.qml` 顶部:

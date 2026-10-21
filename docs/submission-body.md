@@ -59,8 +59,12 @@ same-user process that renames the directory or plants a symlink cannot
 redirect a write. The reader treats a record as untrusted: it refuses a
 symlink, a special file and anything over 64 KiB. The completion toast is
 content-free — the agent's label and a fixed state word, never a prompt or a
-message — because omarchy's notification path takes the text as argv and then
-persists it (upstream `basecamp/omarchy#8209`, fix `#8259` pending).
+message — because the text still goes through `omarchy-notification-send`'s
+argv and the notification engine persists the summary and body in its history,
+so anything more would be kept on disk. The toast names its sender as `Muster`,
+so the current engine groups it, applies Do Not Disturb and snoozes, and keeps
+it in history; its state mark uses the standard `image-path` hint (`--image`),
+because the engine's `-i` is a themed icon name, not a file path.
 
 The bar marks are omarchy's own agent glyphs, copied from
 `setup.default.agent.*` in
@@ -69,7 +73,8 @@ The bar marks are omarchy's own agent glyphs, copied from
 introduces no third-party assets.
 
 Removing the plugin leaves the state directory and omarchy's own notification
-log behind; the removal steps in the README cover each. The plugin does not
+state (`live.json`, `history.json`, `quiet.json`) behind; the removal steps in
+the README cover each. The plugin does not
 overwrite user configuration: the only settings are a completion sound and a
 completion notification, both toggled in the panel.
 

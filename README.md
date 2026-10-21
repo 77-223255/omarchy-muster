@@ -128,9 +128,10 @@ rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/muster"
 ```
 
 `omarchy plugin remove` deletes the plugin directory and its entry in
-`~/.config/omarchy/shell.json`, and nothing else. The notification log under
-`~/.local/state/omarchy/notifications/` is omarchy's own; delete it too if you
-want the toast history gone. If you installed from a
+`~/.config/omarchy/shell.json`, and nothing else. Omarchy's notification state
+under `~/.local/state/omarchy/notifications/` (`live.json`, `history.json`,
+`quiet.json`) is the shell's own; delete it too if you want the toast history
+and quiet state gone. If you installed from a
 checkout with the symlink above, delete the symlink and your clone instead:
 
 ```bash
@@ -146,7 +147,7 @@ creates `omarchy/muster/sessions` and `omarchy/muster/marks` under it — plus
 cannot be parsed is reported once in the shell log, so the shell journal can
 contain that file's name.) Removing the plugin does not remove that state; the
 uninstall step above does. (The completion alert also asks omarchy's own
-notification service to show a toast, and that service keeps its own log under
+notification service to show a toast, and that service keeps its state under
 `~/.local/state/omarchy/notifications/`; the plugin sends it no prompt, no
 message and no session name — only the agent's label, a fixed state word, and
 the window id the click needs.)
@@ -212,13 +213,18 @@ omarchy's own settings screen offers them too.
 
 **The notification is content-free**: it carries the agent's label and a fixed
 state word ("Run finished", "Run failed", "Needs your input"), never a prompt
-or a message. omarchy's notification path takes the text as process arguments
-and persists it, so anything more would be readable from `/proc/<pid>/cmdline`
-and kept on disk
-([basecamp/omarchy#8209](https://github.com/basecamp/omarchy/issues/8209), fix
-[#8259](https://github.com/basecamp/omarchy/pull/8259) pending). This branch
-has no setting that changes that: there is no prompt to show in the first
-place.
+or a message. The text still goes through `omarchy-notification-send`'s argv
+(visible from `/proc/<pid>/cmdline`) and the notification engine persists the
+summary and body in its history under `~/.local/state/omarchy/notifications/`,
+so anything more would be kept on disk. This branch has no setting that changes
+that: there is no prompt to show in the first place.
+
+The toast names its sender as `Muster`, so the current Omarchy notification
+engine groups Muster's cards, applies Do Not Disturb and per-source snoozes,
+and keeps them in history. (The sender's default name, `omarchy-action`, is
+reserved for Omarchy's own confirmation toasts: it bypasses quiet and is
+dropped when silenced.) The state mark is sent with `--image`; the engine's
+`-i` is a themed icon name, not a file path.
 
 Everything else is deliberately internal — a widget whose alerts went quiet
 because of a stray setting is worse than one you tune by editing a line. They
